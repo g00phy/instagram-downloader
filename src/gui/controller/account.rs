@@ -10,6 +10,7 @@ use crate::cli::{self, DownloadArgs};
 use crate::config::Settings;
 use crate::download::Downloader;
 use crate::error::{Error, ErrorKind, Result};
+use crate::fsutil;
 use crate::gui::protocol::{AccountStatus, LogLevel, Update};
 use crate::instagram::{Client, UserSummary};
 use crate::redact;
@@ -212,7 +213,7 @@ fn write_settings(path: &Path, settings: &Settings) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(Error::io(format!("cannot write {}", tmp.display()), err));
     }
-    if let Err(err) = std::fs::rename(&tmp, path) {
+    if let Err(err) = fsutil::rename_with_retry(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(Error::io(format!("cannot replace {}", path.display()), err));
     }

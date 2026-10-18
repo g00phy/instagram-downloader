@@ -15,6 +15,7 @@ use crate::archive::Archive;
 use crate::cookies::{self, CookieJar};
 use crate::download::{DownloadConfig, Downloader, Event, Job, Outcome, UrlRefresher};
 use crate::error::{Error, ErrorKind, Result};
+use crate::fsutil;
 use crate::instagram::{self, Client, ClientConfig, CrawlOptions, Resolved};
 use crate::links::{self, Target};
 use crate::model::{ItemError, ItemStatus, MediaFile, Package};
@@ -86,19 +87,31 @@ pub fn collect_links(args: &[String], inputs: &[PathBuf]) -> Result<Vec<String>>
                 .map_err(|err| Error::io("cannot read links from stdin", err))?;
             text
         } else {
-            std::fs::read_to_string(input)
-                .map_err(|err| Error::io(format!("cannot read {}", input.display()), err))?
+            read_links_file(input)?
         };
         links.extend(links::read_links(&text));
     }
     let mut seen = HashSet::new();
     links.retain(|link| !link.is_empty() && seen.insert(link.clone()));
     if links.is_empty() {
+        // PowerShell treats a bare `@natgeo` as splatting an undefined variable
+        // and passes nothing, so the user did type a link that never arrived.
         return Err(Error::Config(
-            "no links given (pass URLs, @usernames, or -i FILE)".into(),
+            "no links given (pass URLs, usernames, or -i FILE; \
+             in PowerShell quote '@natgeo' or leave out the @)"
+                .into(),
         ));
     }
     Ok(links)
+}
+
+/// Reads a links file written by any Windows tool: UTF-8 (with or without a
+/// BOM), UTF-16 from Windows PowerShell 5.1's `>`/`Out-File`, and anything else
+/// (e.g. ANSI from `Set-Content`) lossily, since links are ASCII anyway.
+fn read_links_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .map_err(|err| Error::io(format!("cannot read {}", path.display()), err))?;
+    Ok(fsutil::decode_text(&bytes).unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// Loads and validates the configured cookie file: `None` when none is
@@ -254,8 +267,12 @@ pub(crate) fn plan(
 
 /// Keeps planned paths unique within a batch (templates without `{index}` or
 /// `{id}` can render the same name twice): `x.jpg`, `x (2).jpg`, …
+///
+/// Paths that differ only in letter case count as the same, because NTFS, SMB
+/// shares and macOS store them as one file: the first keeps its casing, the
+/// next one is numbered. `used` holds the case-folded keys (see [`fold_case`]).
 fn distinct_path(path: PathBuf, used: &mut HashSet<PathBuf>) -> PathBuf {
-    if used.insert(path.clone()) {
+    if used.insert(fold_case(&path)) {
         return path;
     }
     let stem = path
@@ -269,11 +286,17 @@ fn distinct_path(path: PathBuf, used: &mut HashSet<PathBuf>) -> PathBuf {
     let mut n = 2;
     loop {
         let candidate = path.with_file_name(format!("{stem} ({n}){ext}"));
-        if used.insert(candidate.clone()) {
+        if used.insert(fold_case(&candidate)) {
             return candidate;
         }
         n += 1;
     }
+}
+
+/// Upper-cases a path the way case-insensitive filesystems compare names (NTFS
+/// upper-cases both sides), so `Good.jpg` and `good.jpg` give the same key.
+fn fold_case(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().to_uppercase())
 }
 
 fn print_grabbed(grabbed: &Grabbed, package: Option<u64>, already_queued: usize) {
@@ -912,5 +935,83 @@ mod tests {
         assert_eq!(a, PathBuf::from("u/x.jpg"));
         assert_eq!(b, PathBuf::from("u/x (2).jpg"));
         assert_eq!(c, PathBuf::from("u/x (3).jpg"));
+    }
+
+    #[test]
+    fn distinct_paths_ignore_letter_case() {
+        let mut used = HashSet::new();
+        let first = distinct_path(PathBuf::from("u/Good morning.jpg"), &mut used);
+        let second = distinct_path(PathBuf::from("u/good morning.jpg"), &mut used);
+        let third = distinct_path(PathBuf::from("u/GOOD MORNING.jpg"), &mut used);
+        assert_eq!(first, PathBuf::from("u/Good morning.jpg"));
+        assert_eq!(second, PathBuf::from("u/good morning (2).jpg"));
+        assert_eq!(third, PathBuf::from("u/GOOD MORNING (3).jpg"));
+
+        // Folder names count too: `Travel` and `travel` are one folder on NTFS.
+        let a = distinct_path(PathBuf::from("u/Travel/01.jpg"), &mut used);
+        let b = distinct_path(PathBuf::from("u/travel/01.jpg"), &mut used);
+        let c = distinct_path(PathBuf::from("u/travel/02.jpg"), &mut used);
+        assert_eq!(a, PathBuf::from("u/Travel/01.jpg"));
+        assert_eq!(b, PathBuf::from("u/travel/01 (2).jpg"));
+        assert_eq!(c, PathBuf::from("u/travel/02.jpg"));
+
+        // A numbered name that is already taken in another casing moves on.
+        let d = distinct_path(PathBuf::from("u/X.jpg"), &mut used);
+        let e = distinct_path(PathBuf::from("u/x (2).JPG"), &mut used);
+        let f = distinct_path(PathBuf::from("u/x.jpg"), &mut used);
+        assert_eq!(d, PathBuf::from("u/X.jpg"));
+        assert_eq!(e, PathBuf::from("u/x (2).JPG"));
+        assert_eq!(f, PathBuf::from("u/x (3).jpg"));
+    }
+
+    #[test]
+    fn links_files_may_be_utf16_or_ansi() {
+        let dir = tempfile::tempdir().unwrap();
+        let utf16 = dir.path().join("links16.txt");
+        let text = "https://www.instagram.com/p/AAA/\r\nnatgeo\r\n";
+        let bytes: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        std::fs::write(&utf16, bytes).unwrap();
+        // Windows-1252 "é" in a comment is not UTF-8; the links still load.
+        let ansi = dir.path().join("ansi.txt");
+        std::fs::write(&ansi, b"# caf\xE9\r\nhttps://www.instagram.com/p/BBB/\r\n").unwrap();
+
+        let links = collect_links(&[], &[utf16, ansi]).unwrap();
+        assert_eq!(
+            links,
+            [
+                "https://www.instagram.com/p/AAA/",
+                "natgeo",
+                "https://www.instagram.com/p/BBB/"
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_links_file_names_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.txt");
+        let err = collect_links(&[], &[missing]).unwrap_err();
+        assert!(err.to_string().contains("nope.txt"), "{err}");
+    }
+
+    #[test]
+    fn no_links_mentions_powershell_quoting() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.txt");
+        std::fs::write(&empty, "# nothing here\n").unwrap();
+        for result in [
+            collect_links(&[], &[]),
+            collect_links(&["  ".to_string()], &[empty]),
+        ] {
+            let message = match result {
+                Err(Error::Config(message)) => message,
+                other => panic!("expected a config error, got {other:?}"),
+            };
+            assert!(message.starts_with("no links given"), "{message}");
+            assert!(message.contains("PowerShell quote '@natgeo'"), "{message}");
+        }
     }
 }
