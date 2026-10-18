@@ -976,6 +976,7 @@ dependencies = [
  "futures",
  "indicatif",
  "rand",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
