@@ -398,7 +398,9 @@ async fn grab_list_start_through_the_queue() {
 async fn expired_cdn_url_is_refreshed() {
     let env = Env::new().await;
     let code = "Bbbbbbbbbb1";
-    let stale = single_post(&env, code, "3300000000000000201", TAKEN_AT);
+    // Refresh looks the post up by pk, which is the decoded shortcode.
+    let pk = media_id(code).to_string();
+    let stale = single_post(&env, code, &pk, TAKEN_AT);
     let mut fresh = stale.clone();
     fresh["image_versions2"]["candidates"][1]["url"] = json!(env.cdn("fresh.jpg"));
     Mock::given(method("GET"))
