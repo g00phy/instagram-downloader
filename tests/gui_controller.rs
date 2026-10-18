@@ -1086,6 +1086,31 @@ async fn check_account_reports_the_logged_in_user() {
 }
 
 #[tokio::test]
+async fn rate_limited_account_check_is_unverified_not_invalid() {
+    let env = Env::new().await;
+    for route in ["/api/v1/accounts/current_user/", "/api/v1/users/999/info/"] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&env.server)
+            .await;
+    }
+    let mut ui = env.start(Cookies::Valid);
+    startup(&mut ui);
+
+    ui.send(Command::CheckAccount);
+    ui.wait_log(LogLevel::Warn, "could not verify the login");
+    ui.next("Checking", |u| {
+        matches!(u, Update::Account(AccountStatus::Checking))
+    });
+    ui.next(
+        "Unverified",
+        |u| matches!(u, Update::Account(AccountStatus::Unverified(m)) if m.contains("429")),
+    );
+    ui.finish();
+}
+
+#[tokio::test]
 async fn apply_settings_saves_valid_settings_and_rejects_invalid_ones() {
     let env = Env::new().await;
     let mut ui = env.start(Cookies::Valid);

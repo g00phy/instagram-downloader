@@ -107,6 +107,16 @@ fn account_chip(ui: &mut Ui, state: &ViewState, out: &mut Outbox) {
             chip(ui, &format!("@{username}"), palette.green)
                 .on_hover_text(format!("Logged in to Instagram as @{username}"));
         }
+        Some(AccountStatus::Unverified(message)) => {
+            if chip(ui, "Login not verified — retry", palette.amber)
+                .on_hover_text(format!(
+                    "Instagram did not confirm the login right now: {message}\nThe cookies may still be fine. Click to check again."
+                ))
+                .clicked()
+            {
+                out.send(Command::CheckAccount);
+            }
+        }
         Some(AccountStatus::Invalid(message)) => {
             let response = chip(ui, "Cookies problem", palette.red).on_hover_text(message);
             if response.clicked() {

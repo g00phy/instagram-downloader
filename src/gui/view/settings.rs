@@ -506,6 +506,12 @@ fn account_line(ui: &mut Ui, state: &ViewState, palette: Palette) {
         Some(AccountStatus::Invalid(message)) => {
             ui.colored_label(palette.red, message);
         }
+        Some(AccountStatus::Unverified(message)) => {
+            ui.colored_label(
+                palette.amber,
+                format!("Could not verify right now: {message}. The cookies may still be fine; try grabbing a post."),
+            );
+        }
         Some(AccountStatus::Checking) => {
             ui.label(RichText::new("Checking with Instagram…").weak());
         }

@@ -92,7 +92,7 @@ Cookie:            <instagram.com cookies>
 | Purpose | Endpoint | Data |
 |---|---|---|
 | Profile | `/api/v1/users/web_profile_info/?username=U` | `data.user{id, username, is_private, followed_by_viewer}` |
-| Who am I | `/api/v1/users/{ds_user_id}/info/` | `user{pk, username}` |
+| Who am I | `/api/v1/accounts/current_user/?edit=true`, then `/api/v1/users/{ds_user_id}/info/` (one quick attempt each, no backoff) | `user{pk, username}` |
 | Post | `/api/v1/media/{media_id}/info/` | `items[0]` |
 | Posts feed | `/api/v1/feed/user/{user_id}/?count=12&max_id=M` | `items[]`, `more_available`, `next_max_id` |
 | Reels | `POST /api/v1/clips/user/` form `target_user_id=ID&page_size=12&max_id=M` | `items[].media`, `paging_info{more_available, max_id}` |

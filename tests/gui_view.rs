@@ -586,6 +586,18 @@ fn account_chip_reflects_the_cookies() {
 }
 
 #[test]
+fn unverified_login_is_amber_and_clicking_checks_again() {
+    let mut window = Window::new();
+    window.send(Update::Account(AccountStatus::Unverified(
+        "rate limited by Instagram: HTTP 429".to_string(),
+    )));
+    window.run();
+    assert!(!window.shows("Cookies problem"));
+    window.click("Login not verified — retry");
+    assert_eq!(window.sent(), vec![Command::CheckAccount]);
+}
+
+#[test]
 fn log_tab_shows_lines_and_clears_the_badge() {
     let mut window = Window::new();
     for (level, text) in [

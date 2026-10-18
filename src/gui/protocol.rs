@@ -113,6 +113,9 @@ pub enum AccountStatus {
     Checking,
     /// Instagram confirmed the session.
     LoggedIn { username: String },
+    /// The cookies look valid offline, but Instagram could not confirm them right
+    /// now (rate limit, network): not proof they are bad.
+    Unverified(String),
     /// The cookie file is missing/invalid/expired, or Instagram rejected it.
     Invalid(String),
 }

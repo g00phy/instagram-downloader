@@ -9,7 +9,7 @@ use crate::app::{self, NO_COOKIES_WARNING, Options};
 use crate::cli::{self, DownloadArgs};
 use crate::config::Settings;
 use crate::download::Downloader;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::gui::protocol::{AccountStatus, LogLevel, Update};
 use crate::instagram::{Client, UserSummary};
 use crate::redact;
@@ -125,8 +125,15 @@ impl Controller {
             }
             Err(err) => {
                 let message = redact::redact(&err.to_string());
-                self.set_account(AccountStatus::Invalid(message.clone()));
-                self.sink.error(format!("account check failed: {message}"));
+                if matches!(err.kind(), ErrorKind::Auth | ErrorKind::Cookies) {
+                    self.set_account(AccountStatus::Invalid(message.clone()));
+                    self.sink.error(format!("account check failed: {message}"));
+                } else {
+                    self.set_account(AccountStatus::Unverified(message.clone()));
+                    self.sink.warn(format!(
+                        "could not verify the login ({message}); the cookies may still be fine — try grabbing a post"
+                    ));
+                }
             }
         }
     }

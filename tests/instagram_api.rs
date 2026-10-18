@@ -1237,15 +1237,111 @@ async fn html_bodies_are_auth_or_parse() {
 
 // ---------------------------------------------------------------- current user, refresh
 
-#[tokio::test]
-async fn current_user_uses_ds_user_id_or_falls_back() {
-    let server = MockServer::start().await;
+/// Config whose rate-limit backoff would take minutes: "who am I" must not use it.
+fn slow_backoff_config(server: &MockServer) -> ClientConfig {
+    ClientConfig {
+        rate_limit_wait: Duration::from_secs(30),
+        rate_limit_retries: 3,
+        ..config(server)
+    }
+}
+
+async fn mount_viewer_endpoints(
+    server: &MockServer,
+    current: ResponseTemplate,
+    by_id: ResponseTemplate,
+    by_id_calls: u64,
+) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/accounts/current_user/"))
+        .and(query_param("edit", "true"))
+        .respond_with(current)
+        .expect(1)
+        .mount(server)
+        .await;
     Mock::given(method("GET"))
         .and(path(format!("/api/v1/users/{VIEWER_ID}/info/")))
-        .respond_with(ok(json!({"user": {"pk": 999, "username": "viewer", "full_name": "View Er"}, "status": "ok"})))
-        .expect(1)
-        .mount(&server)
+        .respond_with(by_id)
+        .expect(by_id_calls)
+        .mount(server)
         .await;
+}
+
+#[tokio::test]
+async fn current_user_prefers_the_current_user_endpoint() {
+    let server = MockServer::start().await;
+    mount_viewer_endpoints(
+        &server,
+        ok(json!({"user": {"pk": "999", "username": "viewer", "full_name": "View Er"}, "status": "ok"})),
+        ok(json!({"user": {"pk": 999, "username": "unused"}, "status": "ok"})),
+        0,
+    )
+    .await;
+    let me = client(&server).current_user().await.unwrap();
+    assert_eq!((me.id.as_str(), me.username.as_str()), ("999", "viewer"));
+    assert_eq!(me.full_name.as_deref(), Some("View Er"));
+}
+
+#[tokio::test]
+async fn current_user_falls_back_to_the_user_id_endpoint_without_backoff() {
+    let server = MockServer::start().await;
+    mount_viewer_endpoints(
+        &server,
+        ResponseTemplate::new(429),
+        ok(json!({"user": {"pk": 999, "username": "viewer"}, "status": "ok"})),
+        1,
+    )
+    .await;
+    let client = Client::new(slow_backoff_config(&server), Some(jar())).unwrap();
+    let started = std::time::Instant::now();
+    let me = client.current_user().await.unwrap();
+    assert_eq!(me.username, "viewer");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "no rate-limit backoff"
+    );
+}
+
+#[tokio::test]
+async fn current_user_reports_a_rate_limit_quickly_when_every_endpoint_is_throttled() {
+    let server = MockServer::start().await;
+    mount_viewer_endpoints(
+        &server,
+        ResponseTemplate::new(429),
+        ResponseTemplate::new(429),
+        1,
+    )
+    .await;
+    let client = Client::new(slow_backoff_config(&server), Some(jar())).unwrap();
+    let started = std::time::Instant::now();
+    let err = client.current_user().await.unwrap_err();
+    assert!(matches!(err, Error::RateLimited(_)), "{err:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "no rate-limit backoff"
+    );
+    assert!(!format!("{err} {err:?}").contains(SESSION));
+}
+
+#[tokio::test]
+async fn current_user_stops_at_an_authentication_failure() {
+    let server = MockServer::start().await;
+    mount_viewer_endpoints(
+        &server,
+        ResponseTemplate::new(401).set_body_json(
+            json!({"message": "login_required", "require_login": true, "status": "fail"}),
+        ),
+        ok(json!({"user": {"pk": 999, "username": "unused"}, "status": "ok"})),
+        0,
+    )
+    .await;
+    let err = client(&server).current_user().await.unwrap_err();
+    assert!(matches!(err, Error::Auth(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn current_user_without_ds_user_id_uses_only_the_current_user_endpoint() {
+    let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/accounts/current_user/"))
         .and(query_param("edit", "true"))
@@ -1255,10 +1351,6 @@ async fn current_user_uses_ds_user_id_or_falls_back() {
         .expect(1)
         .mount(&server)
         .await;
-    let me = client(&server).current_user().await.unwrap();
-    assert_eq!((me.id.as_str(), me.username.as_str()), ("999", "viewer"));
-    assert_eq!(me.full_name.as_deref(), Some("View Er"));
-
     let no_ds = Client::new(
         config(&server),
         Some(CookieJar::from_pairs([
@@ -1276,8 +1368,7 @@ async fn current_user_uses_ds_user_id_or_falls_back() {
         anonymous.current_user().await,
         Err(Error::Auth(_))
     ));
-    // Only the two expected requests were made.
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 #[tokio::test]

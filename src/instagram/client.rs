@@ -110,6 +110,16 @@ enum Payload<'a> {
     Form(&'a str),
 }
 
+/// How hard a request tries after rate limits and transient failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retries {
+    /// Back off and retry (crawling: waiting beats failing).
+    Full,
+    /// One attempt; a rate limit or network error is reported at once
+    /// (interactive checks such as "who am I", where minutes of backoff help nobody).
+    Quick,
+}
+
 /// How one attempt failed.
 enum Failure {
     /// Retry after the rate-limit backoff; the message is already redacted.
@@ -173,7 +183,8 @@ impl Client {
     /// GETs `path_and_query` (e.g. `/api/v1/media/123/info/`) relative to the API
     /// base, with throttling, rate-limit backoff and error classification.
     pub async fn get_json(&self, path_and_query: &str) -> Result<serde_json::Value> {
-        self.request_json(path_and_query, Payload::Get).await
+        self.request_json(path_and_query, Payload::Get, Retries::Full)
+            .await
     }
 
     /// POSTs an `application/x-www-form-urlencoded` body (with `X-CSRFToken`), with
@@ -183,25 +194,71 @@ impl Client {
         let body = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(form.iter())
             .finish();
-        self.request_json(path, Payload::Form(&body)).await
+        self.request_json(path, Payload::Form(&body), Retries::Full)
+            .await
     }
 
-    /// The account the cookies belong to (via `ds_user_id`).
+    /// The account the cookies belong to.
+    ///
+    /// Tries the "who am I" endpoints in [`Client::viewer_endpoints`] order, one
+    /// quick attempt each (no rate-limit backoff: this backs an interactive
+    /// check). An authentication failure ends the search at once; anything else
+    /// (rate limit, network, unexpected shape) moves on to the next endpoint. If
+    /// none answers, the rate-limit error wins, so callers can tell "Instagram is
+    /// throttling" from "the cookies are bad".
     pub async fn current_user(&self) -> Result<UserSummary> {
         if !self.is_authenticated() {
             return Err(Error::Auth(NOT_LOGGED_IN.into()));
         }
-        let (path, fallback_id) = match self.viewer_id() {
-            Some(id) => (format!("/api/v1/users/{id}/info/"), Some(id)),
-            None => ("/api/v1/accounts/current_user/?edit=true".to_string(), None),
-        };
-        let value = self.get_json(&path).await?;
-        let info: UserInfo = models::parse(value, "user info")?;
-        let user = info.user.ok_or_else(|| {
-            Error::Parse("the user info response has no user (are the cookies valid?)".into())
-        })?;
-        summary(user, fallback_id.as_deref(), "")
-            .ok_or_else(|| Error::Parse("the user info response has no user id".into()))
+        let viewer_id = self.viewer_id();
+        let mut last_error: Option<Error> = None;
+        for path in self.viewer_endpoints(viewer_id.as_deref()) {
+            let attempt = async {
+                let value = self
+                    .request_json(&path, Payload::Get, Retries::Quick)
+                    .await?;
+                let info: UserInfo = models::parse(value, "user info")?;
+                let user = info.user.ok_or_else(|| {
+                    Error::Parse(format!("{} returned no user", short_path(&path)))
+                })?;
+                summary(user, viewer_id.as_deref(), "").ok_or_else(|| {
+                    Error::Parse(format!(
+                        "{} returned a user without an id",
+                        short_path(&path)
+                    ))
+                })
+            };
+            match attempt.await {
+                Ok(user) if !user.username.is_empty() => return Ok(user),
+                Ok(_) => {
+                    last_error = Some(Error::Parse(format!(
+                        "{} returned a user without a username",
+                        short_path(&path)
+                    )));
+                }
+                Err(err @ (Error::Auth(_) | Error::Cookies(_) | Error::Config(_))) => {
+                    return Err(err);
+                }
+                Err(err) => {
+                    tracing::debug!(path = %short_path(&path), error = %err, "who-am-i endpoint failed");
+                    let keep_previous = matches!(last_error, Some(Error::RateLimited(_)))
+                        && !matches!(err, Error::RateLimited(_));
+                    if !keep_previous {
+                        last_error = Some(err);
+                    }
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| Error::Auth(NOT_LOGGED_IN.into())))
+    }
+
+    /// "Who am I" endpoints, most reliable first.
+    fn viewer_endpoints(&self, viewer_id: Option<&str>) -> Vec<String> {
+        let mut paths = vec!["/api/v1/accounts/current_user/?edit=true".to_string()];
+        if let Some(id) = viewer_id {
+            paths.push(format!("/api/v1/users/{id}/info/"));
+        }
+        paths
     }
 
     /// Looks a profile up by username.
@@ -239,7 +296,12 @@ impl Client {
         models::truncate(&redacted, MAX_SERVER_TEXT)
     }
 
-    async fn request_json(&self, path_and_query: &str, payload: Payload<'_>) -> Result<Value> {
+    async fn request_json(
+        &self,
+        path_and_query: &str,
+        payload: Payload<'_>,
+        retries: Retries,
+    ) -> Result<Value> {
         if !path_and_query.starts_with('/') || path_and_query.starts_with("//") {
             // Only paths: cookies must never be sent anywhere but the API base.
             return Err(Error::Config(format!(
@@ -259,6 +321,9 @@ impl Client {
             match failure {
                 Failure::Fatal(err) => return Err(err),
                 Failure::RateLimited(message) => {
+                    if retries == Retries::Quick {
+                        return Err(Error::RateLimited(message));
+                    }
                     if rate_attempt >= self.config.rate_limit_retries {
                         return Err(Error::RateLimited(format!(
                             "{message} (gave up after {rate_attempt} retries; try again later or raise the API delay)"
@@ -275,7 +340,9 @@ impl Client {
                     tokio::time::sleep(wait).await;
                 }
                 Failure::Transient(err) => {
-                    if transient_attempt >= self.config.rate_limit_retries {
+                    if retries == Retries::Quick
+                        || transient_attempt >= self.config.rate_limit_retries
+                    {
                         return Err(err);
                     }
                     let base = self.config.rate_limit_wait.min(MAX_TRANSIENT_WAIT);
