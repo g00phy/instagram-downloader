@@ -9,6 +9,8 @@ pub mod config;
 pub mod cookies;
 pub mod download;
 pub mod error;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod instagram;
 pub mod links;
 pub mod model;

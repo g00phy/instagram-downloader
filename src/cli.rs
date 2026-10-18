@@ -39,8 +39,8 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// Options accepted by every command.
-#[derive(Debug, Args)]
+/// Options accepted by every command (and by `igdl-gui`).
+#[derive(Debug, Clone, Default, Args)]
 pub struct GlobalArgs {
     /// Cookie export to authenticate with (cookies.txt, JSON, or a `name=value; …` header)
     #[arg(long, global = true, env = "IGDL_COOKIES", value_name = "FILE")]
@@ -108,7 +108,7 @@ pub struct LinkArgs {
 }
 
 /// What to collect and where to put it.
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub struct CrawlArgs {
     /// Download root [default: current directory]
     #[arg(short, long, value_name = "DIR")]
@@ -140,7 +140,7 @@ pub struct CrawlArgs {
 }
 
 /// How to download.
-#[derive(Debug, Default, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub struct DownloadArgs {
     /// Parallel downloads [default: 4]
     #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..=32))]
@@ -272,11 +272,32 @@ impl From<SectionArg> for ProfileSection {
     }
 }
 
+impl From<ProfileSection> for SectionArg {
+    fn from(value: ProfileSection) -> Self {
+        match value {
+            ProfileSection::Posts => SectionArg::Posts,
+            ProfileSection::Reels => SectionArg::Reels,
+            ProfileSection::Tagged => SectionArg::Tagged,
+            ProfileSection::Stories => SectionArg::Stories,
+            ProfileSection::Highlights => SectionArg::Highlights,
+        }
+    }
+}
+
 /// `--only` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum KindArg {
     Image,
     Video,
+}
+
+impl From<MediaKind> for KindArg {
+    fn from(value: MediaKind) -> Self {
+        match value {
+            MediaKind::Image => KindArg::Image,
+            MediaKind::Video => KindArg::Video,
+        }
+    }
 }
 
 impl From<KindArg> for MediaKind {
@@ -384,7 +405,8 @@ async fn execute(cli: Cli, cancel: &CancellationToken) -> Result<Report> {
     }
 }
 
-fn data_dir(global: &GlobalArgs, settings: &Settings) -> Result<PathBuf> {
+/// The data directory: flag/env, else config, else the platform default.
+pub fn data_dir(global: &GlobalArgs, settings: &Settings) -> Result<PathBuf> {
     match global
         .data_dir
         .clone()
@@ -401,7 +423,7 @@ fn absolute(path: &std::path::Path) -> Result<PathBuf> {
 }
 
 /// Merges flags over config-file settings over defaults.
-fn resolve_options(
+pub fn resolve_options(
     global: &GlobalArgs,
     settings: &Settings,
     crawl: Option<&CrawlArgs>,

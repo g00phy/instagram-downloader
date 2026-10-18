@@ -124,6 +124,9 @@ struct Inner {
     config: DownloadConfig,
     /// One bucket for all transfers, so `limit_rate` caps the aggregate.
     limiter: Option<RateLimiter>,
+    /// Transfer slots shared by every [`Downloader::run`] call, so concurrent
+    /// runs (the GUI starts one per accepted batch) together stay within `jobs`.
+    slots: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for Downloader {
@@ -159,11 +162,13 @@ impl Downloader {
             .limit_rate
             .filter(|rate| *rate > 0)
             .map(RateLimiter::new);
+        let slots = Arc::new(Semaphore::new(config.jobs.max(1)));
         Ok(Downloader {
             inner: Arc::new(Inner {
                 client,
                 config,
                 limiter,
+                slots,
             }),
         })
     }
@@ -173,8 +178,9 @@ impl Downloader {
         &self.inner.config
     }
 
-    /// Runs all `jobs` with at most `config.jobs` in flight and returns when every
-    /// started job has finished. After `cancel` fires no new job starts and running
+    /// Runs all `jobs` with at most `config.jobs` in flight (counted across every
+    /// concurrent `run` of this downloader) and returns when every started job has
+    /// finished. After `cancel` fires no new job starts and running
     /// transfers stop promptly (finishing with a `Cancelled` failure).
     pub async fn run(
         &self,
@@ -183,7 +189,6 @@ impl Downloader {
         events: UnboundedSender<Event>,
         cancel: CancellationToken,
     ) {
-        let slots = Arc::new(Semaphore::new(self.inner.config.jobs.max(1)));
         let mut tasks = JoinSet::new();
         let mut running: HashMap<tokio::task::Id, u64> = HashMap::new();
 
@@ -191,7 +196,7 @@ impl Downloader {
             let permit = tokio::select! {
                 biased;
                 () = cancel.cancelled() => break,
-                permit = Arc::clone(&slots).acquire_owned() => match permit {
+                permit = Arc::clone(&self.inner.slots).acquire_owned() => match permit {
                     Ok(permit) => permit,
                     // The semaphore is never closed; stop scheduling if it ever is.
                     Err(_) => break,

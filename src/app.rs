@@ -101,36 +101,42 @@ pub fn collect_links(args: &[String], inputs: &[PathBuf]) -> Result<Vec<String>>
     Ok(links)
 }
 
-/// Loads and validates the configured cookie file. `None` when none is configured.
-pub fn load_cookies(path: Option<&Path>) -> Result<Option<CookieJar>> {
+/// Loads and validates the configured cookie file: `None` when none is
+/// configured, else the jar and non-fatal warnings (e.g. "csrftoken missing").
+pub fn load_cookies(path: Option<&Path>) -> Result<Option<(CookieJar, Vec<String>)>> {
     let Some(path) = path else {
         return Ok(None);
     };
     let jar = cookies::load(path)?;
     match cookies::validate(&jar, now()) {
-        Ok(report) => {
-            for warning in &report.warnings {
-                progress::note(&format!("warning: cookies: {warning}"));
-            }
-            Ok(Some(jar))
-        }
+        Ok(report) => Ok(Some((jar, report.warnings))),
         Err(Error::Auth(message)) => Err(Error::Cookies(format!("{}: {message}", path.display()))),
         Err(err) => Err(err),
     }
 }
 
+/// Shown when no cookie file is configured.
+pub const NO_COOKIES_WARNING: &str = "no cookies configured (--cookies FILE or IGDL_COOKIES); \
+     Instagram shows most content only to logged-in sessions";
+
 fn make_client(options: &Options) -> Result<Arc<Client>> {
-    let jar = load_cookies(options.cookies.as_deref())?;
-    if jar.is_none() {
-        progress::note(
-            "warning: no cookies configured (--cookies FILE or IGDL_COOKIES); \
-             Instagram shows most content only to logged-in sessions",
-        );
-    }
+    let jar = match load_cookies(options.cookies.as_deref())? {
+        Some((jar, warnings)) => {
+            for warning in &warnings {
+                progress::note(&format!("warning: cookies: {warning}"));
+            }
+            Some(jar)
+        }
+        None => {
+            progress::note(&format!("warning: {NO_COOKIES_WARNING}"));
+            None
+        }
+    };
     Ok(Arc::new(Client::new(options.client.clone(), jar)?))
 }
 
-fn open_archive(options: &Options) -> Result<Archive> {
+/// The archive in the data dir, or a disabled one when `use_archive` is off.
+pub(crate) fn open_archive(options: &Options) -> Result<Archive> {
     if options.use_archive {
         Archive::open(&options.data_dir.join("archive.txt"))
     } else {
@@ -146,12 +152,14 @@ fn now() -> i64 {
 // LinkGrabber
 
 /// One link resolved into files with their planned output paths.
-struct Grabbed {
-    link: String,
-    name: String,
-    files: Vec<(MediaFile, PathBuf)>,
-    archived: usize,
-    notes: Vec<String>,
+#[derive(Debug, Clone)]
+pub(crate) struct Grabbed {
+    pub(crate) link: String,
+    pub(crate) name: String,
+    pub(crate) files: Vec<(MediaFile, PathBuf)>,
+    /// Files left out because the archive already has them.
+    pub(crate) archived: usize,
+    pub(crate) notes: Vec<String>,
 }
 
 /// Resolves every link. Per-link failures are reported and counted; an
@@ -212,7 +220,7 @@ async fn grab_links(
 }
 
 /// Renders output paths for the resolved files and drops archived ones.
-fn plan(
+pub(crate) fn plan(
     link: &str,
     target: &Target,
     resolved: Resolved,
@@ -372,7 +380,7 @@ async fn dry_run(
 // Downloads
 
 /// Re-resolves expired CDN URLs through the API.
-struct ClientRefresher(Arc<Client>);
+pub(crate) struct ClientRefresher(pub(crate) Arc<Client>);
 
 impl UrlRefresher for ClientRefresher {
     fn refresh<'a>(&'a self, media: &'a MediaFile) -> BoxFuture<'a, Result<String>> {
@@ -430,8 +438,14 @@ async fn run_downloads(
     let consume = async {
         while let Some(event) = receiver.recv().await {
             ui.handle(&event);
-            let finished = apply_event(queue, archive, &ui, &event);
-            if finished && last_save.elapsed() >= Duration::from_secs(1) {
+            let effect = apply_event(queue, archive, &event);
+            if let Some(path) = &effect.downloaded {
+                ui.emit_path(path);
+            }
+            if let Some(warning) = &effect.warning {
+                progress::note(&format!("warning: {warning}"));
+            }
+            if effect.finished && last_save.elapsed() >= Duration::from_secs(1) {
                 if let Err(err) = store.save(queue) {
                     progress::note(&format!("warning: cannot save the queue: {err}"));
                 }
@@ -469,9 +483,19 @@ async fn run_downloads(
     })
 }
 
-/// Applies one engine event to the queue (and archive). Returns `true` when an
-/// item finished.
-fn apply_event(queue: &mut Queue, archive: &mut Archive, ui: &Progress, event: &Event) -> bool {
+/// What applying one engine event changed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct EventEffect {
+    /// An item finished (done, skipped, failed or cancelled).
+    pub(crate) finished: bool,
+    /// The path of a newly downloaded file.
+    pub(crate) downloaded: Option<PathBuf>,
+    /// A non-fatal problem worth showing (e.g. the archive could not be written).
+    pub(crate) warning: Option<String>,
+}
+
+/// Applies one engine event to the queue (and archive).
+pub(crate) fn apply_event(queue: &mut Queue, archive: &mut Archive, event: &Event) -> EventEffect {
     match event {
         Event::Started {
             item_id,
@@ -484,7 +508,7 @@ fn apply_event(queue: &mut Queue, archive: &mut Archive, ui: &Progress, event: &
                 item.bytes_total = *total;
                 item.bytes_done = *resumed_from;
             }
-            false
+            EventEffect::default()
         }
         Event::Progress {
             item_id,
@@ -495,18 +519,22 @@ fn apply_event(queue: &mut Queue, archive: &mut Archive, ui: &Progress, event: &
                 item.bytes_done = *done;
                 item.bytes_total = *total;
             }
-            false
+            EventEffect::default()
         }
-        Event::Retrying { .. } => false,
+        Event::Retrying { .. } => EventEffect::default(),
         Event::Refreshed { item_id, url } => {
             if let Some(item) = queue.item_mut(*item_id) {
                 item.media.url = url.clone();
             }
-            false
+            EventEffect::default()
         }
         Event::Finished { item_id, outcome } => {
+            let mut effect = EventEffect {
+                finished: true,
+                ..EventEffect::default()
+            };
             let Some(item) = queue.item_mut(*item_id) else {
-                return true;
+                return effect;
             };
             match outcome {
                 Outcome::Done { path, bytes } => {
@@ -515,15 +543,15 @@ fn apply_event(queue: &mut Queue, archive: &mut Archive, ui: &Progress, event: &
                     item.bytes_total = Some(*bytes);
                     item.path = Some(path.clone());
                     item.error = None;
-                    record(archive, &item.media.key);
-                    ui.emit_path(path);
+                    effect.warning = record(archive, &item.media.key);
+                    effect.downloaded = Some(path.clone());
                 }
                 Outcome::Skipped { path, reason } => {
                     item.status = ItemStatus::Skipped;
                     item.path = Some(path.clone());
                     item.note = Some(reason.clone());
                     item.error = None;
-                    record(archive, &item.media.key);
+                    effect.warning = record(archive, &item.media.key);
                 }
                 Outcome::Failed { error } if error.kind == ErrorKind::Cancelled => {
                     item.status = ItemStatus::Queued;
@@ -536,15 +564,16 @@ fn apply_event(queue: &mut Queue, archive: &mut Archive, ui: &Progress, event: &
                     });
                 }
             }
-            true
+            effect
         }
     }
 }
 
-fn record(archive: &mut Archive, key: &str) {
-    if let Err(err) = archive.insert(key) {
-        progress::note(&format!("warning: cannot update the archive: {err}"));
-    }
+fn record(archive: &mut Archive, key: &str) -> Option<String> {
+    archive
+        .insert(key)
+        .err()
+        .map(|err| format!("cannot update the archive: {err}"))
 }
 
 /// `igdl start`: download everything queued (or the given packages).

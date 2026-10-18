@@ -849,6 +849,63 @@ async fn concurrency_limit_is_honoured() {
 }
 
 #[tokio::test]
+async fn concurrent_runs_share_the_concurrency_limit() {
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let handler: Handler = {
+        let in_flight = in_flight.clone();
+        let peak = peak.clone();
+        Arc::new(move |_, _, mut stream| {
+            let in_flight = in_flight.clone();
+            let peak = peak.clone();
+            Box::pin(async move {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                write_response(
+                    &mut stream,
+                    "200 OK",
+                    &["content-length: 4".to_string()],
+                    b"data",
+                )
+                .await;
+            })
+        })
+    };
+    let (url, _heads) = raw_server(handler).await;
+    let dir = tempfile::tempdir().unwrap();
+    let downloader = Downloader::new(config()).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let batch = |ids: std::ops::RangeInclusive<u64>| -> Vec<Job> {
+        ids.map(|id| job(id, &url, &dir.path().join(format!("{id}.jpg"))))
+            .collect()
+    };
+    let cancel = CancellationToken::new();
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        futures::future::join(
+            downloader.run(batch(1..=3), None, tx.clone(), cancel.clone()),
+            downloader.run(batch(4..=6), None, tx, cancel),
+        ),
+    )
+    .await
+    .expect("runs finished in time");
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    for id in 1..=6 {
+        assert_eq!(done(&events, id).1, 4);
+    }
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        2,
+        "two runs together stay within jobs = 2"
+    );
+}
+
+#[tokio::test]
 async fn limit_rate_slows_transfers() {
     let server = MockServer::start().await;
     let body = payload(150_000);
