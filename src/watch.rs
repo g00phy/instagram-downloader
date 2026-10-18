@@ -53,3 +53,25 @@ impl Clipboard {
         self.diff.update(text)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_contents_are_not_reported() {
+        let link = "https://www.instagram.com/p/C0ffeeXYZ12/";
+        let mut diff = ClipboardDiff::new(Some(link.into()));
+        assert!(diff.update(Some(link.into())).is_empty());
+    }
+
+    #[test]
+    fn new_text_yields_its_instagram_links_once() {
+        let mut diff = ClipboardDiff::default();
+        let text = "look: https://instagram.com/reel/C0ffeeXYZ12/?igsh=x and https://example.com";
+        assert_eq!(diff.update(Some(text.into())).len(), 1);
+        assert!(diff.update(Some(text.into())).is_empty());
+        assert!(diff.update(None).is_empty());
+        assert!(diff.update(Some("no links here".into())).is_empty());
+    }
+}

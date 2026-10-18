@@ -5,9 +5,11 @@ the user-facing specification; this file covers how the code is organised, the r
 every change must follow, and what Instagram's API looks like.
 
 ## Status
-In development. Build order: docs → skeleton with shared types → modules in
-parallel (one agent per module, separate git worktrees) → CLI integration →
-end-to-end tests. Update this section when a stage lands.
+v0.1 implemented: every module, the CLI and end-to-end tests (`tests/cli_e2e.rs`
+drives the `igdl` binary against a mocked API + CDN). Built as: docs → skeleton with
+shared types → four modules in parallel (one agent per git worktree) → CLI
+integration → end-to-end tests. Not yet verified against live Instagram; see
+"Unverified API assumptions" below before changing the client.
 
 ## Purpose
 A JDownloader-style Instagram downloader: links go through a **LinkGrabber**
@@ -54,10 +56,11 @@ links ──► links::parse_link ──► Target
 | `src/download/` | `Downloader`: bounded parallelism, `.part` + Range resume, retries, rate limit, events. |
 | `src/watch.rs` | Clipboard observer (`igdl watch`). |
 
-Dependency direction: `model`/`error` ← everything; `cookies`, `redact`, `links`,
-`naming`, `config` depend only on `model`/`error`; `instagram` uses `cookies`,
-`links`, `redact`; `download` uses `model`, `redact`; only `app`/`cli` know about all
-of them. Do not introduce cycles or let lower layers print to the terminal.
+Dependency direction: `model`/`error` ← everything; `cookies`, `links`, `naming`
+depend only on `model`/`error`; `redact` uses `cookies`; `config` uses `links`
+(for `ProfileSection`); `instagram` uses `cookies`, `links`, `redact`; `download`
+uses only `model`/`error` (its messages never contain URLs); only `app`/`cli` know
+about all of them. Do not introduce cycles or let lower layers print to the terminal.
 
 ## Instagram web API notes
 
@@ -109,6 +112,16 @@ Error signals → `Error`:
 * An HTML body where JSON was expected → `Auth` if it is the login page, else `Parse`.
 * CDN `403`/`410` on a media URL → the signed URL expired: refresh via `media_info`
   once, then retry. CDN URLs carry an `oe=<hex unix time>` expiry parameter.
+
+### Unverified API assumptions
+The client was built from the endpoint shapes above and tested only against mocks.
+When live behaviour differs, these are the first suspects:
+* `POST /api/v1/clips/user/`: first page sent without `max_id`.
+* `reel_ids=highlight%3AN`: the colon is percent-encoded in the query.
+* `login_required` / `require_login` / `checkpoint_required` detection relies on
+  those strings appearing in the JSON body or the redirect `Location`.
+* `X-IG-WWW-Claim` is always `0` (the server's `x-ig-set-www-claim` is ignored).
+* Progressive `video_versions` only; DASH manifests are ignored.
 
 ## Rules for every change
 

@@ -15,8 +15,10 @@ igdl list                                                   # review the queue
 igdl start -j 6                                             # download everything queued
 ```
 
-> Status: under construction. This README is the specification the implementation
-> is built against; see [AGENTS.md](AGENTS.md) for progress.
+> Status: v0.1. Everything below is implemented and covered by 200+ tests that run
+> against a local mock of Instagram's web API and CDN. It has not yet been checked
+> against live Instagram, whose private API changes without notice; see
+> [Limitations](#limitations).
 
 ## Why "like JDownloader"
 
@@ -87,10 +89,10 @@ parameters (`igsh`, `utm_*`) are ignored. `instagr.am` links work too.
 
 | Command | What it does |
 |---|---|
-| `igdl get LINK…` | LinkGrabber + download in one go. `--dry-run` only prints what would be downloaded |
+| `igdl get LINK…` | LinkGrabber + download in one go; finished packages leave the queue, failed items stay for `retry`. `--dry-run` only prints what would be downloaded |
 | `igdl grab LINK…` | Resolve links and add the packages to the queue (nothing is downloaded) |
 | `igdl start` | Download every queued item (resumes partial files). `--package ID` limits it |
-| `igdl list` | Show packages and items with status. `--failed`, `--json` |
+| `igdl list` | Show packages (plus failed/running items). `--items` every item, `--failed`, `--json` |
 | `igdl retry [ID…]` | Re-queue failed items (all, or the given package/item IDs) |
 | `igdl remove ID…` | Remove packages or items from the queue (downloaded files are kept) |
 | `igdl clear` | Remove finished packages (`--failed`, `--all`) |
@@ -108,8 +110,8 @@ stdin (`-i -`).
 | `-o, --out DIR` | current directory | download root (stored per package) |
 | `-j, --jobs N` | `4` | parallel downloads |
 | `--include LIST` | `posts` | profile sections: `posts,reels,tagged,stories,highlights` |
-| `--limit N` | none | max posts per profile section |
-| `--since DATE`, `--until DATE` | none | `YYYY-MM-DD`, filter by post date (UTC) |
+| `--limit N` | none | max posts per profile section (for highlights: max highlight reels) |
+| `--since DATE`, `--until DATE` | none | `YYYY-MM-DD`, filter posts, reels and tagged posts by date (UTC) |
 | `--only image\|video` | both | media type filter |
 | `--update` | off | stop a profile crawl at the first already-downloaded post |
 | `--template T` | see below | output path template |
@@ -199,7 +201,8 @@ cargo test
 ```
 
 Tests never touch the network: the Instagram API and CDN are mocked with a local
-HTTP server (`IGDL_API_BASE` points the client at it). See [AGENTS.md](AGENTS.md)
+HTTP server (`IGDL_API_BASE` points the client at it). `IGDL_LOG` takes a
+`tracing` filter (e.g. `IGDL_LOG=igdl=debug`) for troubleshooting. See [AGENTS.md](AGENTS.md)
 for the architecture and contributor/agent guidelines.
 
 ## Legal
