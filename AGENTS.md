@@ -5,10 +5,12 @@ the user-facing specification; this file covers how the code is organised, the r
 every change must follow, and what Instagram's API looks like.
 
 ## Status
-v0.1 implemented: every module, the CLI and end-to-end tests (`tests/cli_e2e.rs`
-drives the `igdl` binary against a mocked API + CDN). Built as: docs → skeleton with
-shared types → four modules in parallel (one agent per git worktree) → CLI
-integration → end-to-end tests. Not yet verified against live Instagram; see
+v0.1 implemented: every module, the CLI, the desktop window (`igdl-gui`, `gui`
+feature) and end-to-end tests (`tests/cli_e2e.rs` drives the `igdl` binary against a
+mocked API + CDN; `tests/gui_controller.rs` and `tests/gui_view.rs` cover the window).
+Built as: docs → skeleton with shared types → four modules in parallel (one agent per
+git worktree) → CLI integration → end-to-end tests → GUI protocol → controller and
+window in parallel → screenshots under Xvfb. Not yet verified against live Instagram; see
 "Unverified API assumptions" below before changing the client.
 
 ## Purpose
@@ -54,13 +56,22 @@ links ──► links::parse_link ──► Target
 | `src/queue.rs` | `Queue` operations + `QueueStore` (atomic JSON save, exclusive lock). |
 | `src/archive.rs` | Append-only `archive.txt` of finished media keys. |
 | `src/download/` | `Downloader`: bounded parallelism, `.part` + Range resume, retries, rate limit, events. |
-| `src/watch.rs` | Clipboard observer (`igdl watch`). |
+| `src/watch.rs` | Clipboard observer (`igdl watch`, the window's clipboard monitoring). |
+| `src/bin/igdl-gui.rs` | Window entry point (`windows_subsystem = "windows"`), error dialog. |
+| `src/gui/mod.rs` | `gui::run`: logging, eframe (glow) setup, wires controller ⇄ window. |
+| `src/gui/protocol.rs` | The contract: `Command` (window → controller) and `Update` (controller → window). |
+| `src/gui/controller/` | Background thread + tokio runtime owning queue, archive, client, downloader; executes `Command`s, streams `Update`s; `UiLogLayer` forwards `tracing` to the Log tab. |
+| `src/gui/state.rs` | Pure view-model (`ViewState::apply(Update)`): snapshots, live speeds, log ring. |
+| `src/gui/view/` | egui window: toolbar, Downloads table, LinkGrabber, Settings, Log, dialogs. |
 
 Dependency direction: `model`/`error` ← everything; `cookies`, `links`, `naming`
 depend only on `model`/`error`; `redact` uses `cookies`; `config` uses `links`
 (for `ProfileSection`); `instagram` uses `cookies`, `links`, `redact`; `download`
 uses only `model`/`error` (its messages never contain URLs); only `app`/`cli` know
-about all of them. Do not introduce cycles or let lower layers print to the terminal.
+about all of them; `gui` sits beside `cli`/`app` and reuses their helpers. The window
+(`gui::view`) never touches files or the network: everything goes through the
+controller via `gui::protocol`. Do not introduce cycles or let lower layers print to
+the terminal.
 
 ## Instagram web API notes
 
@@ -155,6 +166,9 @@ cargo test
 ```
 
 * Unit tests live next to the code (`#[cfg(test)] mod tests`).
+* The window is tested headlessly with `egui_kittest` (labels are queried, so keep
+  them stable). To look at it, run `igdl-gui` under `Xvfb` (glow renders with Mesa's
+  software GL; winit needs `libxkbcommon-x11-0`) and drive it with `xdotool`.
 * Integration tests in `tests/` drive the library and the `igdl` binary against a
   `wiremock` server; the client honours `IGDL_API_BASE`, the data dir comes from
   `--data-dir`/`IGDL_DATA_DIR`, and delays are set to zero via config/flags.

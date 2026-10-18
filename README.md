@@ -7,6 +7,11 @@ list, then let the **download queue** fetch everything in parallel, resumably, a
 without downloading anything twice. Authentication uses **your own browser cookies**
 (a `cookies.txt` / JSON export); `igdl` never asks for or stores a password.
 
+Two front ends share the same download list and archive: the **`igdl-gui` desktop
+window** and the **`igdl` command line**.
+
+![igdl-gui downloading](docs/gui-downloads.png)
+
 ```powershell
 igdl cookies check --cookies .\cookies.txt --online        # who am I logged in as?
 igdl get https://www.instagram.com/p/C0ffeeXYZ12/ -o D:\insta   # grab + download now
@@ -15,8 +20,8 @@ igdl list                                                   # review the queue
 igdl start -j 6                                             # download everything queued
 ```
 
-> Status: v0.1. Everything below is implemented and covered by 200+ tests that run
-> against a local mock of Instagram's web API and CDN. It has not yet been checked
+> Status: v0.1. Everything below is implemented and covered by ~280 tests that run
+> against a local mock of Instagram's web API and CDN (the window included). It has not yet been checked
 > against live Instagram, whose private API changes without notice; see
 > [Limitations](#limitations).
 
@@ -30,18 +35,45 @@ igdl start -j 6                                             # download everythin
 | Expired links are re-checked | Instagram CDN URLs are signed and expire; on `403/410` the item is re-resolved through the API and retried |
 | Duplicate check | Archive of downloaded media IDs (`archive.txt`) + existing-file check; `--update` stops a profile crawl at the first already-downloaded post |
 | Accounts | Cookies, sent **only** to the Instagram API host, never to the CDN, never logged |
-| Clipboard observer | `igdl watch` adds Instagram links you copy to the queue |
+| Clipboard observer | "Clipboard monitoring" in the window's LinkGrabber, or `igdl watch` |
 | Packager / folder rules | Filename templates: `{owner}/{category}/{date}_{id}_{index}.{ext}` |
 
 ## Install
 
-Requires a stable Rust toolchain (1.89+).
+Requires a stable Rust toolchain (1.95+, from [rustup.rs](https://rustup.rs); on
+Windows also the Visual Studio C++ Build Tools that rustup offers).
 
 ```powershell
-cargo install --path .        # installs `igdl` into ~/.cargo/bin
+cargo install --path .        # installs igdl and igdl-gui into ~/.cargo/bin
 # or
-cargo build --release         # binary at target/release/igdl(.exe)
+cargo build --release         # binaries in target/release/
+cargo build --release --no-default-features   # command line only, no window
 ```
+
+## Desktop window (`igdl-gui`)
+
+Start `igdl-gui` (on Windows double-click `igdl-gui.exe`; it opens without a console
+window). Set your cookie file once under **⚙ Settings**, then:
+
+1. **🔗 LinkGrabber**: paste links or `@usernames` (any text works, or `📂 Load file…`),
+   pick profile sections, limit, date range, image/video filter and the folder, and
+   click **🔍 Grab links**. Each link becomes a package you can expand and review;
+   nothing is downloaded yet. Tick **Clipboard monitoring** to grab every Instagram
+   link you copy.
+2. **⬇ Add & start** moves the checked packages to the download list and starts them
+   (or **Add to download list** to start later with **▶ Start all**).
+3. **⬇ Downloads** shows packages and files with live progress, speed and ETA.
+   Right-click for Open file / Open folder / Retry / Remove / Copy source link;
+   **⏹ Stop** pauses (partial files resume), **↻ Retry failed**, **🗑 Clear finished**.
+4. **📜 Log** shows what the LinkGrabber and downloader did; errors get a red badge.
+
+![igdl-gui LinkGrabber](docs/gui-linkgrabber.png)
+
+The account chip (top right) verifies the cookies with Instagram (`@you` in green when
+logged in). Settings are saved to the same `config.toml` the command line reads.
+Closing the window while downloads run asks first; partial files are kept either way.
+While the window is open it owns the download list: `igdl list` still works, but
+commands that change the list (`grab`, `start`, …) report that another igdl is using it.
 
 ## Cookies (authentication)
 
