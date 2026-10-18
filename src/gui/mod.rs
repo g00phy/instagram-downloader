@@ -7,6 +7,7 @@
 
 pub mod controller;
 pub mod protocol;
+pub mod state;
 pub mod view;
 
 use std::sync::Arc;
