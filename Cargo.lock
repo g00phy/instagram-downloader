@@ -2090,6 +2090,7 @@ dependencies = [
  "arboard",
  "chrono",
  "clap",
+ "console",
  "directories",
  "eframe",
  "egui",
@@ -2113,6 +2114,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "windows-sys 0.61.2",
  "wiremock",
 ]
 

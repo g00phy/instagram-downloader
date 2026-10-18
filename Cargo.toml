@@ -29,6 +29,8 @@ gui = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:rfd", "dep:opener"]
 arboard = { version = "3.7.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
+# Colour decision for log lines on stderr (terminal, NO_COLOR/CLICOLOR, Windows VT mode); already used by indicatif.
+console = { version = "0.16.6", default-features = false, features = ["std"] }
 directories = "6.0.0"
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11", "clipboard", "links"], optional = true }
 # Only to enable egui's bundled emoji/icon fonts (eframe has no switch for them).
@@ -51,6 +53,10 @@ toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 url = "2.5.8"
+
+[target.'cfg(windows)'.dependencies]
+# GetConsoleProcessList: notice that igdl.exe was double-clicked (its console closes on exit).
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
 
 [dev-dependencies]
 egui_kittest = "0.37"
