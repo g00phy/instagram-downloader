@@ -54,6 +54,7 @@ impl Window {
             settings: Box::default(),
             config_path: Some(PathBuf::from("/home/tester/.config/igdl/config.toml")),
             default_out_dir: PathBuf::from("/home/tester/Downloads"),
+            cookies_override: None,
         });
         window.send(Update::Account(AccountStatus::Loaded));
         window.send(Update::Queue(Arc::new(Queue::default())));
@@ -545,6 +546,7 @@ fn new_settings_reset_an_untouched_form() {
         }),
         config_path: None,
         default_out_dir: PathBuf::from("/home/tester/Downloads"),
+        cookies_override: None,
     });
     window.run();
     assert_eq!(
@@ -555,6 +557,46 @@ fn new_settings_reset_an_untouched_form() {
             .as_deref(),
         Some("500K")
     );
+}
+
+#[test]
+fn quoted_paths_are_saved_without_quotes() {
+    let mut window = Window::new();
+    window.click("⚙ Settings");
+    window.type_into("Cookies file", r#" "C:\Users\tester\cookies.txt" "#);
+    window.type_into("Default download folder", r#""D:\My Insta""#);
+    window.click("Save");
+    assert_eq!(
+        window.sent(),
+        vec![Command::ApplySettings(Box::new(Settings {
+            cookies: Some(PathBuf::from(r"C:\Users\tester\cookies.txt")),
+            out_dir: Some(PathBuf::from(r"D:\My Insta")),
+            ..Settings::default()
+        }))]
+    );
+}
+
+#[test]
+fn cookie_override_is_shown_and_allows_checking() {
+    let mut window = Window::new();
+    window.click("⚙ Settings");
+    assert!(!window.shows_containing("IGDL_COOKIES"));
+    assert!(!window.is_enabled("Check login"), "no cookie file anywhere");
+
+    window.send(Update::Settings {
+        settings: Box::default(),
+        config_path: None,
+        default_out_dir: PathBuf::from("/home/tester/Downloads"),
+        cookies_override: Some(PathBuf::from("/home/tester/env-cookies.txt")),
+    });
+    window.run();
+    assert!(window.shows(
+        "Using /home/tester/env-cookies.txt from IGDL_COOKIES or --cookies; \
+         this field is ignored while it is set"
+    ));
+    assert!(window.is_enabled("Check login"));
+    window.click("Check login");
+    assert_eq!(window.sent(), vec![Command::CheckAccount]);
 }
 
 #[test]

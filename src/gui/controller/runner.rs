@@ -1,7 +1,7 @@
 //! The controller's state, startup, event loop and shutdown.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -38,6 +38,38 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long `Shutdown` waits for running downloads to stop.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+
+/// Folder created under Downloads (or the home folder) for the window's downloads.
+const DEFAULT_FOLDER: &str = "Instagram";
+
+/// The window's options: [`cli::resolve_options`] without a grab request, with the
+/// window's default download folder (see [`default_out_dir`]) when the settings
+/// name none. The CLI keeps the current directory as its default; a double-clicked
+/// `igdl-gui.exe` runs in its own folder, which is no place for downloads.
+pub(super) fn base_options(global: &GlobalArgs, settings: &Settings) -> Result<Options> {
+    let mut options = cli::resolve_options(global, settings, None, &DownloadArgs::default())?;
+    if settings.out_dir.is_none() {
+        options.out_dir = default_out_dir(options.out_dir);
+    }
+    Ok(options)
+}
+
+/// `Downloads/Instagram`, else `<home>/Instagram`, else `fallback`.
+pub(super) fn default_out_dir(fallback: PathBuf) -> PathBuf {
+    let dirs = directories::UserDirs::new();
+    let downloads = dirs.as_ref().and_then(|dirs| dirs.download_dir());
+    let home = dirs.as_ref().map(|dirs| dirs.home_dir());
+    pick_out_dir(downloads, home, fallback)
+}
+
+/// The first of `downloads`, `home` (joined with [`DEFAULT_FOLDER`]) and `fallback`.
+fn pick_out_dir(downloads: Option<&Path>, home: Option<&Path>, fallback: PathBuf) -> PathBuf {
+    let usable = |dir: &&Path| dir.is_absolute();
+    downloads
+        .filter(usable)
+        .or(home.filter(usable))
+        .map_or(fallback, |dir| dir.join(DEFAULT_FOLDER))
+}
 
 /// Locks the archive. A poisoned lock still guards a consistent archive: every
 /// mutation is a single `insert` call.
@@ -202,8 +234,7 @@ impl Controller {
             config_path,
         } = config;
         let fatal = |err: Error| err.to_string();
-        let options = cli::resolve_options(&global, &settings, None, &DownloadArgs::default())
-            .map_err(fatal)?;
+        let options = base_options(&global, &settings).map_err(fatal)?;
         let store = QueueStore::open(&options.data_dir).map_err(|err| match err {
             // The only configuration error `open` reports is a lock held elsewhere.
             Error::Config(_) => format!(
@@ -427,6 +458,7 @@ impl Controller {
             settings: Box::new(self.settings.clone()),
             config_path: self.config_path.clone(),
             default_out_dir: self.options.out_dir.clone(),
+            cookies_override: self.global.cookies.clone(),
         });
     }
 
@@ -462,5 +494,45 @@ mod tests {
             stopped: 3,
         };
         assert_eq!(totals.summary(), "0 downloaded, 2 skipped, 3 stopped");
+    }
+
+    #[test]
+    fn default_out_dir_prefers_downloads_then_home_then_the_fallback() {
+        let downloads = Path::new("/home/me/Downloads");
+        let home = Path::new("/home/me");
+        let cwd = PathBuf::from("/opt/igdl");
+        assert_eq!(
+            pick_out_dir(Some(downloads), Some(home), cwd.clone()),
+            PathBuf::from("/home/me/Downloads/Instagram")
+        );
+        assert_eq!(
+            pick_out_dir(None, Some(home), cwd.clone()),
+            PathBuf::from("/home/me/Instagram")
+        );
+        assert_eq!(pick_out_dir(None, None, cwd.clone()), cwd);
+        assert_eq!(
+            pick_out_dir(Some(Path::new("Downloads")), None, cwd.clone()),
+            cwd,
+            "relative folders are not used"
+        );
+    }
+
+    #[test]
+    fn base_options_use_the_default_folder_only_without_a_configured_one() {
+        let global = GlobalArgs {
+            data_dir: Some(PathBuf::from("/data/igdl")),
+            ..GlobalArgs::default()
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let options = base_options(&global, &Settings::default()).unwrap();
+        assert_eq!(options.out_dir, default_out_dir(cwd));
+        assert!(options.out_dir.is_absolute());
+
+        let settings = Settings {
+            out_dir: Some(PathBuf::from("/data/insta")),
+            ..Settings::default()
+        };
+        let options = base_options(&global, &settings).unwrap();
+        assert_eq!(options.out_dir, std::path::absolute("/data/insta").unwrap());
     }
 }
