@@ -240,7 +240,7 @@ pub fn parse(text: &str) -> Result<CookieJar> {
 pub fn load(path: &Path) -> Result<CookieJar> {
     let bytes = std::fs::read(path)
         .map_err(|err| Error::Cookies(format!("cannot read {}: {err}", path.display())))?;
-    let text = decode_text(&bytes).ok_or_else(|| {
+    let text = crate::fsutil::decode_text(&bytes).ok_or_else(|| {
         Error::Cookies(format!(
             "cannot read {}: the file is not UTF-8 or UTF-16 text",
             path.display()
@@ -356,29 +356,6 @@ fn format_date(unix: i64) -> String {
     DateTime::from_timestamp(unix, 0)
         .map(|at| at.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| unix.to_string())
-}
-
-/// Decodes a file's bytes: UTF-16 LE/BE when a UTF-16 BOM is present (Windows
-/// PowerShell `>` writes UTF-16LE), otherwise UTF-8 with an optional BOM.
-fn decode_text(bytes: &[u8]) -> Option<String> {
-    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        return decode_utf16(rest, u16::from_le_bytes);
-    }
-    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        return decode_utf16(rest, u16::from_be_bytes);
-    }
-    let rest = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-    String::from_utf8(rest.to_vec()).ok()
-}
-
-fn decode_utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> Option<String> {
-    if !bytes.len().is_multiple_of(2) {
-        return None;
-    }
-    let units = bytes.chunks_exact(2).map(|pair| unit([pair[0], pair[1]]));
-    char::decode_utf16(units)
-        .collect::<std::result::Result<String, _>>()
-        .ok()
 }
 
 /// Parses a cookie date: RFC 2822 (`Wed, 21 Oct 2015 07:28:00 GMT`) or the

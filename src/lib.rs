@@ -9,6 +9,7 @@ pub mod config;
 pub mod cookies;
 pub mod download;
 pub mod error;
+pub mod fsutil;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod instagram;
