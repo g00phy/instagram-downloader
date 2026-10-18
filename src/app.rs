@@ -81,11 +81,13 @@ pub fn collect_links(args: &[String], inputs: &[PathBuf]) -> Result<Vec<String>>
     }
     for input in inputs {
         let text = if input.as_os_str() == "-" {
-            let mut text = String::new();
+            // Bytes, not `read_to_string`: `igdl get -i - < links.txt` in cmd.exe
+            // passes a PowerShell-written UTF-16 file through unchanged.
+            let mut bytes = Vec::new();
             std::io::stdin()
-                .read_to_string(&mut text)
+                .read_to_end(&mut bytes)
                 .map_err(|err| Error::io("cannot read links from stdin", err))?;
-            text
+            decode_links(&bytes)
         } else {
             read_links_file(input)?
         };
@@ -111,7 +113,12 @@ pub fn collect_links(args: &[String], inputs: &[PathBuf]) -> Result<Vec<String>>
 fn read_links_file(path: &Path) -> Result<String> {
     let bytes = std::fs::read(path)
         .map_err(|err| Error::io(format!("cannot read {}", path.display()), err))?;
-    Ok(fsutil::decode_text(&bytes).unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned()))
+    Ok(decode_links(&bytes))
+}
+
+/// Decodes links text like [`fsutil::decode_text`], falling back to lossy UTF-8.
+fn decode_links(bytes: &[u8]) -> String {
+    fsutil::decode_text(bytes).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// Loads and validates the configured cookie file: `None` when none is
@@ -987,6 +994,19 @@ mod tests {
                 "https://www.instagram.com/p/BBB/"
             ]
         );
+    }
+
+    #[test]
+    fn piped_links_are_decoded_like_files() {
+        // What `igdl get -i - < links.txt` in cmd.exe receives from a file
+        // written by Windows PowerShell 5.1: UTF-16LE with a BOM.
+        let utf16: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("natgeo\r\n".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert_eq!(decode_links(&utf16), "natgeo\r\n");
+        assert_eq!(decode_links(b"\xEF\xBB\xBFnatgeo\n"), "natgeo\n");
+        assert_eq!(decode_links(b"caf\xE9 natgeo"), "caf\u{FFFD} natgeo");
     }
 
     #[test]

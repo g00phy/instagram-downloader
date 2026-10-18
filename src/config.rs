@@ -117,13 +117,16 @@ impl Settings {
         .filter_map(|(key, path)| path.as_ref().map(|path| (key, path)))
     }
 
-    /// Applies [`clean_path`] to the path settings.
+    /// Applies [`clean_path`] to the path settings. Values with control
+    /// characters are left alone so [`Settings::validate`] rejects them: trimming
+    /// would turn `"D:\t"` (a TAB, from an escape) into `D:` without a word.
     fn clean_paths(&mut self) {
         for path in [&mut self.out_dir, &mut self.cookies, &mut self.data_dir]
             .into_iter()
             .flatten()
         {
             if let Some(text) = path.to_str()
+                && !text.chars().any(char::is_control)
                 && clean_path(text) != text
             {
                 *path = PathBuf::from(clean_path(text));
@@ -592,6 +595,17 @@ mod tests {
             ..Settings::default()
         };
         assert!(settings.validate().is_err());
+
+        // An escape at the very end must not be trimmed away as whitespace:
+        // `"D:\t"` is the folder `D:\t` mistyped, not `D:`.
+        for contents in [r#"out_dir = "D:\t""#, r#"out_dir = "E:\n""#] {
+            let (_dir, path) = write_config(contents);
+            let message = config_message(load(Some(&path)));
+            assert!(
+                message.contains("out_dir contains a control character"),
+                "{contents}: {message}"
+            );
+        }
     }
 
     #[test]
