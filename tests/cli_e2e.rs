@@ -155,6 +155,12 @@ impl Run {
     }
 }
 
+/// `out/testuser/posts/<name>` built from components, so it compares equal to
+/// the paths igdl prints on every platform (no mixed `/` and `\`).
+fn posts_file(out: &Path, name: &str) -> PathBuf {
+    out.join("testuser").join("posts").join(name)
+}
+
 fn media_id(shortcode: &str) -> u64 {
     igdl::links::shortcode_to_media_id(shortcode).unwrap()
 }
@@ -245,8 +251,8 @@ async fn get_downloads_a_carousel_and_rerun_downloads_nothing() {
     assert_eq!(run.code, 0, "{}", run.debug());
     run.assert_no_secrets();
 
-    let image = out.join("testuser/posts/2024-05-01_C0ffeeXYZ12_01.jpg");
-    let video = out.join("testuser/posts/2024-05-01_C0ffeeXYZ12_02.mp4");
+    let image = posts_file(&out, "2024-05-01_C0ffeeXYZ12_01.jpg");
+    let video = posts_file(&out, "2024-05-01_C0ffeeXYZ12_02.mp4");
     assert_eq!(std::fs::read(&image).unwrap(), b"JPEG-DATA-1");
     assert_eq!(std::fs::read(&video).unwrap(), b"MP4-DATA-2");
     let printed: Vec<&str> = run.stdout.lines().collect();
@@ -373,18 +379,9 @@ async fn grab_list_start_through_the_queue() {
     let start = env.igdl_auth(&["start", "-j", "2"]).await;
     assert_eq!(start.code, 0, "{}", start.debug());
     assert_eq!(start.stdout.lines().count(), 2, "{}", start.debug());
-    assert!(
-        out.join("testuser/posts/2024-05-01_Aaaaaaaaaa1_01.jpg")
-            .exists()
-    );
-    assert!(
-        out.join("testuser/posts/2024-05-01_Aaaaaaaaaa2_01.jpg")
-            .exists()
-    );
-    assert!(
-        !out.join("testuser/posts/2024-05-01_Aaaaaaaaaa3_01.jpg")
-            .exists()
-    );
+    assert!(posts_file(&out, "2024-05-01_Aaaaaaaaaa1_01.jpg").exists());
+    assert!(posts_file(&out, "2024-05-01_Aaaaaaaaaa2_01.jpg").exists());
+    assert!(!posts_file(&out, "2024-05-01_Aaaaaaaaaa3_01.jpg").exists());
     let queue = env.queue();
     let items = queue["packages"][0]["items"].as_array().unwrap();
     assert!(items.iter().all(|i| i["status"] == "done"), "{queue:#}");
@@ -428,7 +425,7 @@ async fn expired_cdn_url_is_refreshed() {
         ])
         .await;
     assert_eq!(run.code, 0, "{}", run.debug());
-    let file = out.join(format!("testuser/posts/2024-05-01_{code}_01.jpg"));
+    let file = posts_file(&out, &format!("2024-05-01_{code}_01.jpg"));
     assert_eq!(std::fs::read(file).unwrap(), b"FRESH");
 }
 
@@ -593,7 +590,7 @@ async fn failed_items_stay_queued_for_retry() {
     let start = env.igdl_auth(&["start"]).await;
     assert_eq!(start.code, 0, "{}", start.debug());
     assert_eq!(
-        std::fs::read(out.join(format!("testuser/posts/2024-05-01_{code}_01.jpg"))).unwrap(),
+        std::fs::read(posts_file(&out, &format!("2024-05-01_{code}_01.jpg"))).unwrap(),
         b"NOW-OK"
     );
 }

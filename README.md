@@ -40,15 +40,49 @@ igdl start -j 6                                             # download everythin
 
 ## Install
 
-Requires a stable Rust toolchain (1.95+, from [rustup.rs](https://rustup.rs); on
-Windows also the Visual Studio C++ Build Tools that rustup offers).
+Requires a stable Rust toolchain, 1.95 or newer.
 
 ```powershell
-cargo install --path .        # installs igdl and igdl-gui into ~/.cargo/bin
+cargo install --locked --path .   # installs igdl and igdl-gui into the cargo bin folder
 # or
-cargo build --release         # binaries in target/release/
-cargo build --release --no-default-features   # command line only, no window
+cargo build --release --locked    # binaries in target/release/
+cargo build --release --locked --no-default-features   # command line only, no window
 ```
+
+`--locked` builds the exact dependency versions in `Cargo.lock` that were tested;
+without it `cargo install` picks newer ones.
+
+### Windows step by step
+
+1. Install Rust with [rustup-init.exe](https://rustup.rs) and accept its offer to
+   install the **Visual Studio C++ Build Tools** (or `winget install Rustlang.Rustup`
+   plus `winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait
+   --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`).
+2. **Close every PowerShell, Windows Terminal and VS Code window and open a new
+   one.** rustup adds `%USERPROFILE%\.cargo\bin` to PATH, but windows that were
+   already open never see it (`cargo : The term 'cargo' is not recognized`). For the
+   current window only: `$env:Path += ";$env:USERPROFILE\.cargo\bin"`.
+3. Check: `cargo --version` (1.95+, otherwise `rustup update`).
+4. In the repository folder: `cargo install --locked --path .`, then run `igdl-gui`
+   (or `igdl --help`). `where.exe igdl-gui` shows where it was installed.
+
+Troubleshooting:
+
+* *Access is denied* while installing: `igdl-gui.exe` is still running; close it first.
+* Building from a network or mapped drive is slow or fails with locking errors: build
+  locally with `$env:CARGO_TARGET_DIR = "$env:LOCALAPPDATA\igdl-build"` first.
+* Windows 11 *Smart App Control* can block the unsigned helper programs cargo builds;
+  if the build fails with "An Application Control policy has blocked this file",
+  turn Smart App Control off (Windows Security → App & browser control) or use a
+  prebuilt `igdl-gui.exe`.
+* Windows on ARM additionally needs LLVM/clang (`winget install LLVM.LLVM`) for the
+  TLS library.
+* Downloaded (unsigned) `.exe` files trigger SmartScreen: *More info → Run anyway*.
+
+PowerShell specifics: `@name` means *splatting* in PowerShell, so write `natgeo` or
+`'@natgeo'` instead of a bare `@natgeo`. Paths printed on stdout are UTF-8; before
+piping them into other PowerShell 5.1 commands run
+`[Console]::OutputEncoding = [Text.Encoding]::UTF8` so non-ASCII names survive.
 
 ## Desktop window (`igdl-gui`)
 
@@ -107,7 +141,7 @@ Treat the file like a password: anyone holding `sessionid` is logged in as you.
 | Link | Resolves to |
 |---|---|
 | `instagram.com/p/<code>/`, `/reel/<code>/`, `/reels/<code>/`, `/tv/<code>/`, `/<user>/p/<code>/` | one post (all carousel items); `?img_index=N` keeps only item *N* |
-| `instagram.com/<user>/` , `@user`, `user` | the profile's posts (or `--include` sections) |
+| `instagram.com/<user>/` , `@user` (`'@user'` in PowerShell), `user` | the profile's posts (or `--include` sections) |
 | `instagram.com/<user>/reels/` | the profile's reels |
 | `instagram.com/<user>/tagged/` | posts the user is tagged in |
 | `instagram.com/stories/<user>/` | the user's current stories |
