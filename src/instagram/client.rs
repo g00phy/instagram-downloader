@@ -75,6 +75,14 @@ impl Client {
         todo!("instagram agent")
     }
 
+    /// POSTs an `application/x-www-form-urlencoded` body (with `X-CSRFToken`), with
+    /// the same throttling and error handling as [`Client::get_json`]. Used by
+    /// endpoints such as `/api/v1/clips/user/`.
+    pub async fn post_form(&self, path: &str, form: &[(&str, &str)]) -> Result<serde_json::Value> {
+        let _ = (path, form);
+        todo!("instagram agent")
+    }
+
     /// The account the cookies belong to (via `ds_user_id`).
     pub async fn current_user(&self) -> Result<UserSummary> {
         todo!("instagram agent")

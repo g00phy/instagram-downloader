@@ -61,8 +61,8 @@ of them. Do not introduce cycles or let lower layers print to the terminal.
 
 ## Instagram web API notes
 
-Base `https://www.instagram.com` (overridable with `IGDL_API_BASE` for tests). All
-calls are `GET` with these headers:
+Base `https://www.instagram.com` (overridable with `IGDL_API_BASE` for tests). Calls
+are `GET` unless marked `POST` (form-encoded), all with these headers:
 
 ```text
 User-Agent:        desktop Chrome UA (configurable)
@@ -81,7 +81,7 @@ Cookie:            <instagram.com cookies>
 | Who am I | `/api/v1/users/{ds_user_id}/info/` | `user{pk, username}` |
 | Post | `/api/v1/media/{media_id}/info/` | `items[0]` |
 | Posts feed | `/api/v1/feed/user/{user_id}/?count=12&max_id=M` | `items[]`, `more_available`, `next_max_id` |
-| Reels | `/api/v1/clips/user/?target_user_id=ID&page_size=12&max_id=M` | `items[].media`, `paging_info{more_available, max_id}` |
+| Reels | `POST /api/v1/clips/user/` form `target_user_id=ID&page_size=12&max_id=M` | `items[].media`, `paging_info{more_available, max_id}` |
 | Tagged | `/api/v1/usertags/{user_id}/feed/?count=12&max_id=M` | like the posts feed |
 | Stories | `/api/v1/feed/reels_media/?reel_ids={user_id}` | `reels_media[].items[]` (or `reels{id}.items`) |
 | Highlights list | `/api/v1/highlights/{user_id}/highlights_tray/` | `tray[]{id: "highlight:N", title}` |
