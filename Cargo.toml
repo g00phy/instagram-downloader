@@ -30,7 +30,9 @@ arboard = { version = "3.7.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4.6.7", features = ["derive", "env", "wrap_help"] }
 directories = "6.0.0"
-eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11", "clipboard", "links"], optional = true }
+# glow (OpenGL) first; wgpu (Direct3D 12 incl. the WARP software rasterizer, Vulkan) is the
+# fallback when OpenGL 2+ is missing (Remote Desktop, VMs without 3D, no graphics driver).
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu", "wayland", "x11", "clipboard", "links"], optional = true }
 # Only to enable egui's bundled emoji/icon fonts (eframe has no switch for them).
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"], optional = true }
 egui_extras = { version = "0.37", optional = true }
