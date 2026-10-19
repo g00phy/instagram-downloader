@@ -10,7 +10,7 @@ use eframe::egui::{
     Ui,
 };
 
-use super::settings::clean_path;
+use super::settings::{clean_path, dialog_folder};
 use super::style::Palette;
 use super::{Outbox, Tab};
 use crate::config::parse_date;
@@ -383,8 +383,8 @@ impl GrabberView {
             }
             if ui.button("Browse…").clicked() {
                 let mut dialog = rfd::FileDialog::new().set_title("Save downloads to");
-                if !clean_path(&form.out_dir).is_empty() {
-                    dialog = dialog.set_directory(clean_path(&form.out_dir));
+                if let Some(dir) = dialog_folder(&form.out_dir) {
+                    dialog = dialog.set_directory(dir);
                 }
                 if let Some(dir) = dialog.pick_folder() {
                     form.out_dir = dir.display().to_string();

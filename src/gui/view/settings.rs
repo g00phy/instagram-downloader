@@ -152,6 +152,15 @@ pub(super) fn clean_path(text: &str) -> &str {
         .unwrap_or(text)
 }
 
+/// Where a folder dialog for the typed `text` starts: that folder or, while it
+/// does not exist yet (the default `Downloads/Instagram` before the first
+/// download), its nearest existing parent; `None` when nothing of it exists.
+pub(super) fn dialog_folder(text: &str) -> Option<&Path> {
+    Path::new(clean_path(text))
+        .ancestors()
+        .find(|dir| !dir.as_os_str().is_empty() && dir.is_dir())
+}
+
 /// An unchanged text keeps its original value; empty means unset.
 fn text_field(text: &str, original: &Option<String>) -> Option<String> {
     if original.as_deref() == Some(text) {
@@ -335,8 +344,8 @@ impl SettingsView {
             .labelled_by(label.id);
             if ui.button("Browse…").clicked() {
                 let mut dialog = rfd::FileDialog::new().set_title("Default download folder");
-                if !clean_path(&form.out_dir).is_empty() {
-                    dialog = dialog.set_directory(clean_path(&form.out_dir));
+                if let Some(dir) = dialog_folder(&form.out_dir) {
+                    dialog = dialog.set_directory(dir);
                 }
                 if let Some(dir) = dialog.pick_folder() {
                     form.out_dir = dir.display().to_string();
@@ -643,6 +652,22 @@ mod tests {
             ..SettingsForm::new(&full())
         };
         assert_eq!(form.settings().out_dir, None, "empty quotes unset it");
+    }
+
+    #[test]
+    fn folder_dialogs_start_in_the_nearest_existing_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let text = root.path().display().to_string();
+        assert_eq!(dialog_folder(&text), Some(root.path()));
+        let missing = root.path().join("Downloads").join("Instagram");
+        assert_eq!(
+            dialog_folder(&format!(" \"{}\" ", missing.display())),
+            Some(root.path()),
+            "a folder that does not exist yet opens its parent"
+        );
+        assert_eq!(dialog_folder(""), None);
+        assert_eq!(dialog_folder(r#""""#), None);
+        assert_eq!(dialog_folder("igdl-no-such-folder"), None);
     }
 
     #[test]
