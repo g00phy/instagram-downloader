@@ -236,7 +236,11 @@ fn data_dir_from(
     platform: impl FnOnce() -> Option<PathBuf>,
 ) -> Result<PathBuf> {
     if let Some(value) = env_value.filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(value));
+        // cmd.exe keeps the quotes of `set IGDL_DATA_DIR="D:\igdl"` in the value.
+        return Ok(match value.to_str() {
+            Some(text) => PathBuf::from(clean_path(text)),
+            None => PathBuf::from(value),
+        });
     }
     platform().ok_or_else(|| {
         Error::Config(format!(
@@ -252,16 +256,36 @@ fn load_optional(path: &Path, near_misses: &[PathBuf]) -> Result<Settings> {
         Ok(text) => parse_settings(&text, path),
         Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
             if let Some(found) = near_misses.iter().find(|candidate| candidate.is_file()) {
-                tracing::warn!(
-                    "{} is not read: igdl reads its settings from {} (move the file there)",
-                    found.display(),
-                    path.display()
-                );
+                tracing::warn!("{}", misplaced_message(found, path));
             }
             Ok(Settings::default())
         }
         Err(err) => Err(read_error(path, err)),
     }
+}
+
+/// The warning for a `config.toml` found at `found` while igdl reads `expected`.
+fn misplaced_message(found: &Path, expected: &Path) -> String {
+    format!(
+        "{} is not read: igdl reads its settings from {} (move the file there)",
+        found.display(),
+        expected.display()
+    )
+}
+
+/// When the default `config.toml` does not exist but one sits in a near-miss
+/// location, the warning to show (the window repeats it in its Log tab, where
+/// stderr warnings are invisible on Windows).
+pub fn misplaced_config_warning() -> Option<String> {
+    let dirs = project_dirs()?;
+    let expected = dirs.config_dir().join(CONFIG_FILE);
+    if expected.exists() {
+        return None;
+    }
+    near_miss_paths(dirs.config_dir(), default_data_dir().ok().as_deref())
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .map(|found| misplaced_message(found, &expected))
 }
 
 /// Places where users put `config.toml` by mistake, given the platform config

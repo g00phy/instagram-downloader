@@ -47,9 +47,10 @@ pub const CRASH_LOG_FILE: &str = "igdl-gui-crash.log";
 /// and the next one gets a go. The controller is started at most once, by the
 /// attempt that got a window. When none works the error says what to do.
 pub fn run(global: GlobalArgs) -> Result<()> {
+    // Logging first, so warnings from loading the settings are not lost.
+    init_logging(&global);
     let settings = config::load(global.config.as_deref())?;
     let config_path = global.config.clone().or_else(config::default_config_path);
-    init_logging(&global);
     let renderers = renderer_order(std::env::var(ENV_RENDERER).ok().as_deref())?;
     let mut config = Some(ControllerConfig {
         global,
@@ -224,6 +225,7 @@ fn init_logging(global: &GlobalArgs) {
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(std::io::stderr)
+                .with_ansi(console::colors_enabled_stderr())
                 .without_time()
                 .with_filter(stderr_filter),
         )

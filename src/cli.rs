@@ -522,7 +522,8 @@ fn log_settings_source(explicit: Option<&Path>) {
 pub fn data_dir(global: &GlobalArgs, settings: &Settings) -> Result<PathBuf> {
     match global
         .data_dir
-        .clone()
+        .as_deref()
+        .map(cleaned)
         .or_else(|| settings.data_dir.clone())
     {
         Some(dir) => absolute(&dir),
@@ -533,6 +534,15 @@ pub fn data_dir(global: &GlobalArgs, settings: &Settings) -> Result<PathBuf> {
 fn absolute(path: &std::path::Path) -> Result<PathBuf> {
     std::path::absolute(path)
         .map_err(|err| Error::io(format!("cannot resolve {}", path.display()), err))
+}
+
+/// A path from a flag or environment variable without surrounding whitespace and
+/// quotes (cmd.exe keeps the quotes of `set IGDL_COOKIES="C:\x\cookies.txt"`).
+fn cleaned(path: &std::path::Path) -> PathBuf {
+    match path.to_str() {
+        Some(text) => PathBuf::from(config::clean_path(text)),
+        None => path.to_path_buf(),
+    }
 }
 
 /// Merges flags over config-file settings over defaults.
@@ -628,7 +638,7 @@ pub fn resolve_options(
             template = t.clone();
         }
         if let Some(out) = &args.out {
-            out_dir = Some(out.clone());
+            out_dir = Some(cleaned(out));
         }
         use_archive = !args.no_archive;
     }
@@ -642,7 +652,11 @@ pub fn resolve_options(
         None => std::env::current_dir()
             .map_err(|err| Error::io("cannot determine the current directory", err))?,
     };
-    let cookies = global.cookies.clone().or_else(|| settings.cookies.clone());
+    let cookies = global
+        .cookies
+        .as_deref()
+        .map(cleaned)
+        .or_else(|| settings.cookies.clone());
 
     Ok(Options {
         cookies,
@@ -808,6 +822,18 @@ mod tests {
     #[test]
     fn console_check_is_windows_only() {
         assert_eq!(console_process_count(), None);
+    }
+
+    #[test]
+    fn flag_paths_lose_surrounding_quotes() {
+        assert_eq!(
+            cleaned(std::path::Path::new("\"C:\\x y\\cookies.txt\" ")),
+            PathBuf::from("C:\\x y\\cookies.txt")
+        );
+        assert_eq!(
+            cleaned(std::path::Path::new("plain")),
+            PathBuf::from("plain")
+        );
     }
 
     #[test]

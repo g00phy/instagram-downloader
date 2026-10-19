@@ -16,7 +16,7 @@ use super::sink::Sink;
 use crate::app::{self, Options};
 use crate::archive::Archive;
 use crate::cli::{self, DownloadArgs, GlobalArgs};
-use crate::config::Settings;
+use crate::config::{self, Settings};
 use crate::download::{Downloader, Event};
 use crate::error::{Error, Result};
 use crate::gui::protocol::{Command, LogLine, StagedPackage, Update};
@@ -312,6 +312,11 @@ impl Controller {
         controller.sink.send(Update::Downloading(false));
         for (level, text) in logs {
             controller.sink.log(level, text);
+        }
+        if controller.global.config.is_none()
+            && let Some(warning) = config::misplaced_config_warning()
+        {
+            controller.sink.warn(warning);
         }
         if interrupted > 0 {
             controller.sink.info(format!(

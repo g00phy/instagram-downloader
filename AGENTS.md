@@ -56,9 +56,10 @@ links ──► links::parse_link ──► Target
 | `src/queue.rs` | `Queue` operations + `QueueStore` (atomic JSON save, exclusive lock). |
 | `src/archive.rs` | Append-only `archive.txt` of finished media keys. |
 | `src/download/` | `Downloader`: bounded parallelism, `.part` + Range resume, retries, rate limit, events. |
+| `src/fsutil.rs` | UTF-8/UTF-16 text files (`read_text`), renames retried through brief Windows file locks. |
 | `src/watch.rs` | Clipboard observer (`igdl watch`, the window's clipboard monitoring). |
 | `src/bin/igdl-gui.rs` | Window entry point (`windows_subsystem = "windows"`), error dialog. |
-| `src/gui/mod.rs` | `gui::run`: logging, eframe (glow) setup, wires controller ⇄ window. |
+| `src/gui/mod.rs` | `gui::run`: logging, eframe setup (glow, falling back to wgpu; `IGDL_RENDERER`), crash log, wires controller ⇄ window. |
 | `src/gui/protocol.rs` | The contract: `Command` (window → controller) and `Update` (controller → window). |
 | `src/gui/controller/` | Background thread + tokio runtime owning queue, archive, client, downloader; executes `Command`s, streams `Update`s; `UiLogLayer` forwards `tracing` to the Log tab. |
 | `src/gui/state.rs` | Pure view-model (`ViewState::apply(Update)`): snapshots, live speeds, log ring. |

@@ -483,19 +483,16 @@ impl GrabberView {
         else {
             return;
         };
-        match std::fs::read_to_string(&path) {
+        // UTF-8 (with or without BOM) and UTF-16, as Windows PowerShell 5.1 writes it.
+        match crate::fsutil::read_text(&path) {
             Ok(contents) => {
                 let text = &mut self.form.text;
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
                 }
-                // Windows editors may start the file with a byte order mark.
-                text.push_str(contents.trim_start_matches('\u{feff}'));
+                text.push_str(&contents);
             }
-            Err(err) => out.notice(
-                LogLevel::Warn,
-                format!("Cannot read {}: {err}", path.display()),
-            ),
+            Err(err) => out.notice(LogLevel::Warn, format!("Cannot load the links file: {err}")),
         }
     }
 
