@@ -115,11 +115,15 @@ fn no_renderer_message(failures: &[(eframe::Renderer, String)]) -> String {
         let api = renderer_api(*renderer);
         message.push_str(&format!("\n• {renderer} ({api}): {reason}"));
     }
+    message.push_str("\n\nInstall or update the graphics driver");
+    if cfg!(windows) {
+        message.push_str(
+            " (from the PC or graphics card maker, not the Microsoft Basic Display Adapter)",
+        );
+    }
     message.push_str(
-        "\n\nInstall or update the graphics driver (from the PC or graphics card maker, \
-         not the Microsoft Basic Display Adapter). Remote Desktop sessions and virtual \
-         machines without 3D acceleration often lack OpenGL 2+: enable 3D acceleration \
-         in the VM or start igdl-gui locally. \
+        ". Remote Desktop sessions and virtual machines without 3D acceleration often \
+         lack OpenGL 2+: enable 3D acceleration in the VM or start igdl-gui locally. \
          The igdl command line works without a window.",
     );
     message
@@ -186,19 +190,22 @@ fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
         run_and_return: true,
         ..Default::default()
     };
-    // On Windows wgpu is the fallback for a missing/broken OpenGL driver: use
-    // Direct3D 12, which also offers the WARP software rasterizer (wgpu picks
-    // CPU adapters last, so a real GPU still wins), and Vulkan. Its OpenGL
-    // backend would hit the same driver glow just failed on. `WGPU_BACKEND`
-    // still overrides this.
     if cfg!(windows)
-        && eframe::wgpu::Backends::from_env().is_none()
         && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
     {
         setup.instance_descriptor.backends =
-            eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::VULKAN;
+            windows_wgpu_backends(eframe::wgpu::Backends::from_env());
     }
     options
+}
+
+/// The wgpu backends on Windows, where wgpu is the fallback for a missing or
+/// broken OpenGL driver: Direct3D 12, which also offers the WARP software
+/// rasterizer (wgpu picks CPU adapters last, so a real GPU still wins), and
+/// Vulkan. wgpu's OpenGL backend would hit the same driver glow just failed on.
+/// `from_env` (`WGPU_BACKEND`) still overrides this.
+fn windows_wgpu_backends(from_env: Option<eframe::wgpu::Backends>) -> eframe::wgpu::Backends {
+    from_env.unwrap_or(eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::VULKAN)
 }
 
 /// stderr gets warnings (or `IGDL_LOG`), the Log tab gets igdl's INFO and above.
@@ -421,6 +428,12 @@ mod tests {
         assert!(message.contains("graphics driver"));
         assert!(message.contains("Remote Desktop"));
         assert!(message.contains("command line"));
+        // Windows-only advice stays off other platforms.
+        assert_eq!(
+            message.contains("Microsoft Basic Display Adapter"),
+            cfg!(windows),
+            "{message}"
+        );
     }
 
     #[test]
@@ -450,18 +463,24 @@ mod tests {
         let options = native_options(Wgpu);
         assert_eq!(options.renderer, Wgpu);
         assert!(options.run_and_return);
-        if cfg!(windows) && eframe::wgpu::Backends::from_env().is_none() {
-            let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &options.wgpu_options.wgpu_setup
-            else {
-                panic!("expected a fresh wgpu setup");
-            };
-            assert!(
-                setup
-                    .instance_descriptor
-                    .backends
-                    .contains(eframe::wgpu::Backends::DX12)
-            );
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &options.wgpu_options.wgpu_setup
+        else {
+            panic!("expected a fresh wgpu setup");
+        };
+        if cfg!(windows) {
+            let expected = windows_wgpu_backends(eframe::wgpu::Backends::from_env());
+            assert_eq!(setup.instance_descriptor.backends, expected);
         }
+    }
+
+    #[test]
+    fn wgpu_on_windows_uses_direct3d_12_and_vulkan_unless_wgpu_backend_says_otherwise() {
+        use eframe::wgpu::Backends;
+        let backends = windows_wgpu_backends(None);
+        assert!(backends.contains(Backends::DX12), "{backends:?}");
+        assert!(backends.contains(Backends::VULKAN), "{backends:?}");
+        assert!(!backends.contains(Backends::GL), "{backends:?}");
+        assert_eq!(windows_wgpu_backends(Some(Backends::GL)), Backends::GL);
     }
 
     #[test]
