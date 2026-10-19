@@ -9,6 +9,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::fsutil;
 use crate::links::ProfileSection;
 
 /// Environment variable overriding the data directory.
@@ -19,6 +20,13 @@ pub const MAX_JOBS: usize = 32;
 
 /// Largest accepted `retries` value.
 pub const MAX_RETRIES: u32 = 100;
+
+/// File name of the settings file.
+const CONFIG_FILE: &str = "config.toml";
+
+/// How to write a Windows path in TOML, for errors caused by backslash escapes.
+const WINDOWS_PATH_HINT: &str = "Windows paths need single quotes (out_dir = 'D:\\insta') \
+     or doubled backslashes (out_dir = \"D:\\\\insta\")";
 
 /// Settings read from `config.toml`. Every field is optional; CLI flags win.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -42,10 +50,20 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Checks the values that are set: `jobs` in `1..=32`, `api_delay` finite and
-    /// ≥ 0, `retries` ≤ 100, a non-empty `template`, a valid `limit_rate` and
-    /// known `include` sections. The error names the offending key.
+    /// Checks the values that are set: paths without control characters,
+    /// `jobs` in `1..=32`, `api_delay` finite and ≥ 0, `retries` ≤ 100, a
+    /// non-empty `template`, a valid `limit_rate` and known `include` sections.
+    /// The error names the offending key.
     pub fn validate(&self) -> Result<()> {
+        for (key, path) in self.paths() {
+            // What `"C:\temp"` becomes in a double-quoted TOML string: `\t` is a TAB.
+            if path.to_string_lossy().chars().any(char::is_control) {
+                return Err(Error::Config(format!(
+                    "{key} contains a control character (\"C:\\temp\" in double quotes holds \
+                     a TAB: \\t is an escape); {WINDOWS_PATH_HINT}"
+                )));
+            }
+        }
         if let Some(jobs) = self.jobs
             && !(1..=MAX_JOBS).contains(&jobs)
         {
@@ -87,11 +105,48 @@ impl Settings {
         }
         Ok(())
     }
+
+    /// The path settings that are set, with their keys.
+    fn paths(&self) -> impl Iterator<Item = (&'static str, &PathBuf)> {
+        [
+            ("out_dir", &self.out_dir),
+            ("cookies", &self.cookies),
+            ("data_dir", &self.data_dir),
+        ]
+        .into_iter()
+        .filter_map(|(key, path)| path.as_ref().map(|path| (key, path)))
+    }
+
+    /// Applies [`clean_path`] to the path settings. Values with control
+    /// characters are left alone so [`Settings::validate`] rejects them: trimming
+    /// would turn `"D:\t"` (a TAB, from an escape) into `D:` without a word.
+    fn clean_paths(&mut self) {
+        for path in [&mut self.out_dir, &mut self.cookies, &mut self.data_dir]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(text) = path.to_str()
+                && !text.chars().any(char::is_control)
+                && clean_path(text) != text
+            {
+                *path = PathBuf::from(clean_path(text));
+            }
+        }
+    }
+}
+
+/// Trims whitespace and one pair of surrounding double quotes from a path typed
+/// or pasted by the user (Explorer's "Copy as path" adds the quotes).
+pub fn clean_path(text: &str) -> &str {
+    let text = text.trim();
+    text.strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .map_or(text, str::trim)
 }
 
 /// `<config dir>/config.toml` (`%APPDATA%\igdl\config\config.toml`, `~/.config/igdl/config.toml`).
 pub fn default_config_path() -> Option<PathBuf> {
-    project_dirs().map(|dirs| dirs.config_dir().join("config.toml"))
+    project_dirs().map(|dirs| dirs.config_dir().join(CONFIG_FILE))
 }
 
 /// Data directory: `$IGDL_DATA_DIR`, else the platform data dir
@@ -103,15 +158,21 @@ pub fn default_data_dir() -> Result<PathBuf> {
 }
 
 /// Loads settings. An explicit path must exist; the default path may be absent
-/// (→ `Settings::default()`). Unknown keys are a [`crate::error::Error::Config`].
+/// (→ `Settings::default()`, with a warning when a `config.toml` sits in a
+/// near-miss location). UTF-8 and UTF-16 files are accepted; path settings are
+/// cleaned with [`clean_path`]. Unknown keys are a [`crate::error::Error::Config`].
 pub fn load(explicit: Option<&Path>) -> Result<Settings> {
     match explicit {
         Some(path) => {
-            let text = std::fs::read_to_string(path).map_err(|err| read_error(path, &err))?;
+            let text = fsutil::read_text(path).map_err(|err| read_error(path, err))?;
             parse_settings(&text, path)
         }
-        None => match default_config_path() {
-            Some(path) => load_optional(&path),
+        None => match project_dirs() {
+            Some(dirs) => {
+                let near_misses =
+                    near_miss_paths(dirs.config_dir(), default_data_dir().ok().as_deref());
+                load_optional(&dirs.config_dir().join(CONFIG_FILE), &near_misses)
+            }
             None => Ok(Settings::default()),
         },
     }
@@ -184,34 +245,96 @@ fn data_dir_from(
     })
 }
 
-/// Loads a config file that may legitimately be absent (the default path).
-fn load_optional(path: &Path) -> Result<Settings> {
-    match std::fs::read_to_string(path) {
+/// Loads a config file that may legitimately be absent (the default path). When
+/// it is absent, warns about the first of `near_misses` that exists.
+fn load_optional(path: &Path, near_misses: &[PathBuf]) -> Result<Settings> {
+    match fsutil::read_text(path) {
         Ok(text) => parse_settings(&text, path),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
-        Err(err) => Err(read_error(path, &err)),
+        Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(found) = near_misses.iter().find(|candidate| candidate.is_file()) {
+                tracing::warn!(
+                    "{} is not read: igdl reads its settings from {} (move the file there)",
+                    found.display(),
+                    path.display()
+                );
+            }
+            Ok(Settings::default())
+        }
+        Err(err) => Err(read_error(path, err)),
     }
 }
 
-fn read_error(path: &Path, err: &std::io::Error) -> Error {
-    Error::Config(format!("cannot read config file {}: {err}", path.display()))
+/// Places where users put `config.toml` by mistake, given the platform config
+/// and data dirs: the parent of the config dir while still inside igdl's own
+/// folder (Windows adds a `config` subfolder: `%APPDATA%\igdl\config.toml`), the
+/// data dir, and `config.toml.txt` (Notepad's default type, shown without `.txt`).
+fn near_miss_paths(config_dir: &Path, data_dir: Option<&Path>) -> Vec<PathBuf> {
+    let default = config_dir.join(CONFIG_FILE);
+    let mut candidates = Vec::new();
+    if config_dir.file_name().is_some_and(|name| name != "igdl")
+        && let Some(parent) = config_dir.parent()
+    {
+        candidates.push(parent.join(CONFIG_FILE));
+    }
+    if let Some(data_dir) = data_dir {
+        candidates.push(data_dir.join(CONFIG_FILE));
+    }
+    candidates.push(config_dir.join(format!("{CONFIG_FILE}.txt")));
+    candidates.retain(|candidate| *candidate != default);
+    candidates.dedup();
+    candidates
+}
+
+/// Turns a [`fsutil::read_text`] failure into a config error naming the path.
+fn read_error(path: &Path, err: Error) -> Error {
+    match err {
+        Error::Io { source, .. } => Error::Config(format!(
+            "cannot read config file {}: {source}",
+            path.display()
+        )),
+        other => other,
+    }
 }
 
 /// Parses and validates `config.toml` contents; errors are prefixed with `path`.
 fn parse_settings(text: &str, path: &Path) -> Result<Settings> {
-    // Windows editors may save a UTF-8 byte order mark, which TOML rejects.
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let settings: Settings = toml::from_str(text).map_err(|err| {
-        Error::Config(format!(
-            "{}: {}",
-            path.display(),
-            err.to_string().trim_end()
-        ))
+    let mut settings: Settings = toml::from_str(text).map_err(|err| {
+        let mut message = format!("{}: {}", path.display(), err.to_string().trim_end());
+        if has_backslash_escape(text) {
+            message.push_str("\nhint: ");
+            message.push_str(WINDOWS_PATH_HINT);
+        }
+        Error::Config(message)
     })?;
+    settings.clean_paths();
     settings
         .validate()
         .map_err(|err| with_context(&path.display().to_string(), err))?;
     Ok(settings)
+}
+
+/// Whether a double-quoted TOML string holds a backslash that is not part of a
+/// doubled `\\`: the usual sign of a Windows path written in the wrong quotes.
+/// A line-by-line heuristic for error hints (multi-line strings are not tracked).
+fn has_backslash_escape(text: &str) -> bool {
+    text.lines().any(|line| {
+        let mut chars = line.chars();
+        let mut quote = None;
+        while let Some(c) = chars.next() {
+            match (quote, c) {
+                (None, '#') => break,
+                (None, '"' | '\'') => quote = Some(c),
+                (Some(open), _) if c == open => quote = None,
+                // `\\` is an escaped backslash; anything else after `\` is suspect.
+                (Some('"'), '\\') => match chars.next() {
+                    Some('\\') => {}
+                    _ => return true,
+                },
+                _ => {}
+            }
+        }
+        false
+    })
 }
 
 /// Prefixes a config error message with `context: `.
@@ -291,13 +414,240 @@ mod tests {
     #[test]
     fn absent_default_file_gives_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let settings = load_optional(&dir.path().join("config.toml")).unwrap();
+        let settings = load_optional(&dir.path().join("config.toml"), &[]).unwrap();
         assert_eq!(settings, Settings::default());
 
         let (_dir, path) = write_config("jobs = 3");
-        assert_eq!(load_optional(&path).unwrap().jobs, Some(3));
+        assert_eq!(load_optional(&path, &[]).unwrap().jobs, Some(3));
         // A directory where the file should be is not "absent".
-        assert!(load_optional(dir.path()).is_err());
+        assert!(load_optional(dir.path(), &[]).is_err());
+    }
+
+    /// Collects what a `tracing` fmt subscriber writes.
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn load_optional_logged(path: &Path, near_misses: &[PathBuf]) -> (Settings, String) {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let settings = tracing::subscriber::with_default(subscriber, || {
+            load_optional(path, near_misses).unwrap()
+        });
+        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        (settings, output)
+    }
+
+    #[test]
+    fn warns_about_a_config_in_a_near_miss_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("igdl").join("config");
+        let default = config_dir.join("config.toml");
+        let near_misses = near_miss_paths(&config_dir, None);
+
+        let (settings, output) = load_optional_logged(&default, &near_misses);
+        assert_eq!(settings, Settings::default());
+        assert!(output.is_empty(), "{output}");
+
+        let misplaced = dir.path().join("igdl").join("config.toml");
+        std::fs::create_dir_all(misplaced.parent().unwrap()).unwrap();
+        std::fs::write(&misplaced, "jobs = 2\n").unwrap();
+        let (settings, output) = load_optional_logged(&default, &near_misses);
+        assert_eq!(
+            settings,
+            Settings::default(),
+            "the misplaced file is not read"
+        );
+        assert!(output.contains("WARN"), "{output}");
+        assert!(
+            output.contains(&format!("{} is not read", misplaced.display())),
+            "{output}"
+        );
+        assert!(
+            output.contains(&format!("reads its settings from {}", default.display())),
+            "{output}"
+        );
+
+        // Once the real file exists there is nothing to warn about.
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(&default, "jobs = 4\n").unwrap();
+        let (settings, output) = load_optional_logged(&default, &near_misses);
+        assert_eq!(settings.jobs, Some(4));
+        assert!(output.is_empty(), "{output}");
+    }
+
+    #[test]
+    fn near_miss_locations() {
+        // Windows: %APPDATA%\igdl\config holds the file; %APPDATA%\igdl is a near miss.
+        let config_dir = Path::new("/appdata/igdl/config");
+        assert_eq!(
+            near_miss_paths(config_dir, Some(Path::new("/appdata/igdl/data"))),
+            [
+                PathBuf::from("/appdata/igdl/config.toml"),
+                PathBuf::from("/appdata/igdl/data/config.toml"),
+                PathBuf::from("/appdata/igdl/config/config.toml.txt"),
+            ]
+        );
+        // Linux: ~/.config is not igdl's folder; macOS: data dir == config dir.
+        assert_eq!(
+            near_miss_paths(Path::new("/home/me/.config/igdl"), None),
+            [PathBuf::from("/home/me/.config/igdl/config.toml.txt")]
+        );
+        let mac = Path::new("/Users/me/Library/Application Support/igdl");
+        assert_eq!(
+            near_miss_paths(mac, Some(mac)),
+            [mac.join("config.toml.txt")]
+        );
+    }
+
+    #[test]
+    fn reads_utf16_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Windows PowerShell 5.1 `Out-File` / `>` writes UTF-16LE with a BOM.
+        let text = "out_dir = 'C:\\Users\\José\\insta'\r\njobs = 5\r\n";
+        let bytes: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        std::fs::write(&path, bytes).unwrap();
+        let settings = load(Some(&path)).unwrap();
+        assert_eq!(
+            settings.out_dir,
+            Some(PathBuf::from(r"C:\Users\José\insta"))
+        );
+        assert_eq!(settings.jobs, Some(5));
+
+        std::fs::write(&path, b"out_dir = 'C:\\Users\\Jos\xE9'\r\n").unwrap();
+        let message = config_message(load(Some(&path)));
+        assert!(message.contains("config.toml"), "{message}");
+        assert!(message.contains("not UTF-8 or UTF-16"), "{message}");
+    }
+
+    #[test]
+    fn hints_at_single_quotes_for_windows_paths() {
+        // Invalid escapes: `\U` and `\i`.
+        for contents in [
+            r#"cookies = "C:\Users\me\cookies.txt""#,
+            r#"out_dir = "D:\insta""#,
+            r#"jobs = 2 # "D:\x" in a comment is fine
+            out_dir = "D:\insta""#,
+        ] {
+            let (_dir, path) = write_config(contents);
+            let message = config_message(load(Some(&path)));
+            assert!(message.contains("config.toml"), "{contents}: {message}");
+            assert!(
+                message.contains("hint: Windows paths need single quotes (out_dir = 'D:\\insta')"),
+                "{contents}: {message}"
+            );
+        }
+        // Errors unrelated to backslashes get no hint.
+        for contents in [
+            "jobs = \"many\"",
+            r#"out_dir = 'D:\insta'
+            colour = "blue""#,
+            r#"out_dir = "D:\\insta"
+            colour = "blue""#,
+        ] {
+            let (_dir, path) = write_config(contents);
+            let message = config_message(load(Some(&path)));
+            assert!(!message.contains("hint:"), "{contents}: {message}");
+        }
+    }
+
+    #[test]
+    fn rejects_control_characters_in_paths() {
+        // Valid TOML escapes that turn Windows paths into TAB, LF, BS and ESC.
+        for (contents, key) in [
+            (r#"out_dir = "D:\temp""#, "out_dir"),
+            (r#"out_dir = "C:\new folder""#, "out_dir"),
+            (r#"cookies = "D:\backup.txt""#, "cookies"),
+            (r#"data_dir = "D:\escape""#, "data_dir"),
+        ] {
+            let (_dir, path) = write_config(contents);
+            let message = config_message(load(Some(&path)));
+            assert!(
+                message.contains(&format!("{key} contains a control character")),
+                "{contents}: {message}"
+            );
+            assert!(
+                message.contains("Windows paths need single quotes"),
+                "{contents}: {message}"
+            );
+            assert!(message.contains("config.toml"), "{contents}: {message}");
+        }
+        let settings = Settings {
+            out_dir: Some(PathBuf::from("D:\tinsta")),
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_err());
+
+        // An escape at the very end must not be trimmed away as whitespace:
+        // `"D:\t"` is the folder `D:\t` mistyped, not `D:`.
+        for contents in [r#"out_dir = "D:\t""#, r#"out_dir = "E:\n""#] {
+            let (_dir, path) = write_config(contents);
+            let message = config_message(load(Some(&path)));
+            assert!(
+                message.contains("out_dir contains a control character"),
+                "{contents}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn cleans_quoted_and_padded_paths() {
+        assert_eq!(
+            clean_path(r#""C:\Users\me\cookies.txt""#),
+            r"C:\Users\me\cookies.txt"
+        );
+        assert_eq!(clean_path(r#"  "D:\My Insta" "#), r"D:\My Insta");
+        assert_eq!(clean_path(" /data/igdl \t"), "/data/igdl");
+        assert_eq!(clean_path(r#"""#), r#"""#, "a lone quote stays");
+        assert_eq!(clean_path(r#""a"b""#), r#"a"b"#, "one pair only");
+        assert_eq!(clean_path(r"D:\insta"), r"D:\insta");
+
+        let (_dir, path) = write_config(
+            r#"
+            out_dir = '"D:\My Insta"'
+            cookies = '  C:\Users\me\cookies.txt  '
+            data_dir = "/srv/igdl"
+            "#,
+        );
+        let settings = load(Some(&path)).unwrap();
+        assert_eq!(settings.out_dir, Some(PathBuf::from(r"D:\My Insta")));
+        assert_eq!(
+            settings.cookies,
+            Some(PathBuf::from(r"C:\Users\me\cookies.txt"))
+        );
+        assert_eq!(settings.data_dir, Some(PathBuf::from("/srv/igdl")));
+    }
+
+    #[test]
+    fn detects_backslash_escapes_in_basic_strings() {
+        assert!(has_backslash_escape(r#"out_dir = "D:\insta""#));
+        assert!(has_backslash_escape(
+            r#"a = 1
+            b = "x\ty""#
+        ));
+        assert!(!has_backslash_escape(r#"out_dir = "D:\\insta""#));
+        assert!(!has_backslash_escape(r"out_dir = 'D:\insta'"));
+        assert!(!has_backslash_escape(r#"out_dir = '"D:\insta"'"#));
+        assert!(!has_backslash_escape(r#"jobs = 2 # "D:\insta""#));
+        assert!(!has_backslash_escape("template = \"{owner}/{id}.{ext}\""));
     }
 
     #[test]
