@@ -1,7 +1,7 @@
 //! Command-line interface: argument definitions, settings resolution
 //! (flags > environment > `config.toml` > defaults) and exit codes.
 
-use std::io::Write;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -352,8 +352,13 @@ Prompt, e.g. `igdl get <link>`. For the window, open igdl-gui.exe.";
 
 /// Parses arguments, runs the command and returns the process exit code.
 pub async fn run() -> u8 {
-    if is_standalone_console(std::env::args_os().len(), console_process_count()) {
-        return explain_and_wait();
+    let console_processes = console_process_count();
+    // Only a person at the console can read the help and press Enter.
+    let interactive = console_processes.is_some()
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal();
+    if is_standalone_console(std::env::args_os().len(), console_processes, interactive) {
+        return explain_and_wait(&mut std::io::stderr(), &mut std::io::stdin().lock());
     }
     let cli = Cli::parse();
     init_logging(&cli.global);
@@ -374,8 +379,14 @@ pub async fn run() -> u8 {
 /// True when igdl got no arguments and is the only process attached to its
 /// console: it was double-clicked (e.g. in Explorer), so the console window
 /// closes as soon as igdl exits, before anyone can read the usage error.
-fn is_standalone_console(arg_count: usize, console_processes: Option<u32>) -> bool {
-    arg_count <= 1 && console_processes == Some(1)
+/// `interactive`: stdin and stderr are that console (not redirected), so
+/// waiting for Enter cannot stall a program that started igdl.
+fn is_standalone_console(
+    arg_count: usize,
+    console_processes: Option<u32>,
+    interactive: bool,
+) -> bool {
+    arg_count <= 1 && console_processes == Some(1) && interactive
 }
 
 /// How many processes share igdl's console; `None` without a console.
@@ -401,19 +412,18 @@ fn standalone_help() -> String {
     format!("{}\n{STANDALONE_NOTE}\n", Cli::command().render_help())
 }
 
-/// Shows [`standalone_help`] and waits for Enter so the window stays open
-/// until it has been read. Returns the usage exit code, like a missing command.
-fn explain_and_wait() -> u8 {
-    let mut stderr = std::io::stderr().lock();
+/// Shows [`standalone_help`] on `out` and waits for Enter on `input` so the
+/// window stays open until it has been read. Returns the usage exit code,
+/// like a missing command.
+fn explain_and_wait(out: &mut impl Write, input: &mut impl BufRead) -> u8 {
     // Nothing useful can be done if the console cannot be written to.
     let _ = write!(
-        stderr,
+        out,
         "{}\nPress Enter to close this window.",
         standalone_help()
     );
-    let _ = stderr.flush();
-    drop(stderr);
-    let _ = std::io::stdin().read_line(&mut String::new());
+    let _ = out.flush();
+    let _ = input.read_line(&mut String::new());
     EXIT_USAGE
 }
 
@@ -752,13 +762,15 @@ mod tests {
 
     #[test]
     fn only_a_bare_start_in_a_console_of_its_own_pauses() {
-        assert!(is_standalone_console(1, Some(1)));
+        assert!(is_standalone_console(1, Some(1), true));
         // Arguments given (e.g. `igdl --help` from a shortcut): normal behaviour.
-        assert!(!is_standalone_console(2, Some(1)));
+        assert!(!is_standalone_console(2, Some(1), true));
         // Started from a shell, which shares the console.
-        assert!(!is_standalone_console(1, Some(2)));
+        assert!(!is_standalone_console(1, Some(2), true));
         // No console at all, or not Windows.
-        assert!(!is_standalone_console(1, None));
+        assert!(!is_standalone_console(1, None, true));
+        // Started by a program with stdin/stderr redirected: nobody to press Enter.
+        assert!(!is_standalone_console(1, Some(1), false));
     }
 
     #[test]
@@ -767,6 +779,29 @@ mod tests {
         assert!(text.contains("Usage: igdl"), "{text}");
         assert!(text.contains("command-line tool"), "{text}");
         assert!(text.contains("igdl-gui.exe"), "{text}");
+    }
+
+    #[test]
+    fn standalone_start_shows_the_help_and_waits_for_one_enter() {
+        let mut out = Vec::new();
+        let mut input = std::io::Cursor::new(b"\nget something\n".to_vec());
+        assert_eq!(explain_and_wait(&mut out, &mut input), EXIT_USAGE);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with(&standalone_help()), "{text}");
+        assert!(
+            text.ends_with("Press Enter to close this window."),
+            "{text}"
+        );
+        // Exactly the one line (the Enter) was read.
+        assert_eq!(input.position(), 1);
+    }
+
+    #[test]
+    fn standalone_start_returns_when_input_is_closed() {
+        let mut out = Vec::new();
+        let mut input = std::io::Cursor::new(Vec::new());
+        assert_eq!(explain_and_wait(&mut out, &mut input), EXIT_USAGE);
+        assert!(!out.is_empty());
     }
 
     #[cfg(not(windows))]
