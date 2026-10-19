@@ -1,10 +1,11 @@
 //! Command-line interface: argument definitions, settings resolution
 //! (flags > environment > `config.toml` > defaults) and exit codes.
 
-use std::path::PathBuf;
+use std::io::{BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -45,11 +46,11 @@ pub struct GlobalArgs {
     /// Cookie export to authenticate with (cookies.txt, JSON, or a `name=value; …` header)
     #[arg(long, global = true, env = "IGDL_COOKIES", value_name = "FILE")]
     pub cookies: Option<PathBuf>,
-    /// Settings file [default: <config dir>/igdl/config.toml]
-    #[arg(long, global = true, value_name = "FILE")]
+    /// Settings file (default: [`config::default_config_path`]; `--help` shows it)
+    #[arg(long, global = true, value_name = "FILE", help = config_help())]
     pub config: Option<PathBuf>,
-    /// Where queue.json and archive.txt live [default: platform data dir]
-    #[arg(long, global = true, env = "IGDL_DATA_DIR", value_name = "DIR")]
+    /// Where queue.json and archive.txt live (default: [`config::default_data_dir`])
+    #[arg(long, global = true, env = "IGDL_DATA_DIR", value_name = "DIR", help = data_dir_help())]
     pub data_dir: Option<PathBuf>,
     /// User agent for API requests (best: the browser the cookies came from)
     #[arg(long, global = true, value_name = "UA")]
@@ -309,8 +310,56 @@ impl From<KindArg> for MediaKind {
     }
 }
 
+/// Default settings file shown in the help when the real path cannot be
+/// determined (no home directory).
+const CONFIG_PATH_HINT: &str = if cfg!(windows) {
+    r"%APPDATA%\igdl\config\config.toml"
+} else if cfg!(target_os = "macos") {
+    "~/Library/Application Support/igdl/config.toml"
+} else {
+    "~/.config/igdl/config.toml"
+};
+
+/// Default data directory shown in the help when the real path cannot be
+/// determined (no home directory).
+const DATA_DIR_HINT: &str = if cfg!(windows) {
+    r"%APPDATA%\igdl\data"
+} else if cfg!(target_os = "macos") {
+    "~/Library/Application Support/igdl"
+} else {
+    "~/.local/share/igdl"
+};
+
+/// `--config` help naming this platform's real default path.
+fn config_help() -> String {
+    let default = config::default_config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| CONFIG_PATH_HINT.to_string());
+    format!("Settings file [default: {default}]")
+}
+
+/// `--data-dir` help naming this platform's real default directory.
+fn data_dir_help() -> String {
+    let default = config::default_data_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| DATA_DIR_HINT.to_string());
+    format!("Where queue.json and archive.txt live [default: {default}]")
+}
+
+/// Shown under the help when `igdl.exe` was started in a console of its own.
+const STANDALONE_NOTE: &str = "igdl is a command-line tool: run it from PowerShell or Command \
+Prompt, e.g. `igdl get <link>`. For the window, open igdl-gui.exe.";
+
 /// Parses arguments, runs the command and returns the process exit code.
 pub async fn run() -> u8 {
+    let console_processes = console_process_count();
+    // Only a person at the console can read the help and press Enter.
+    let interactive = console_processes.is_some()
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal();
+    if is_standalone_console(std::env::args_os().len(), console_processes, interactive) {
+        return explain_and_wait(&mut std::io::stderr(), &mut std::io::stdin().lock());
+    }
     let cli = Cli::parse();
     init_logging(&cli.global);
     let cancel = CancellationToken::new();
@@ -327,6 +376,57 @@ pub async fn run() -> u8 {
     }
 }
 
+/// True when igdl got no arguments and is the only process attached to its
+/// console: it was double-clicked (e.g. in Explorer), so the console window
+/// closes as soon as igdl exits, before anyone can read the usage error.
+/// `interactive`: stdin and stderr are that console (not redirected), so
+/// waiting for Enter cannot stall a program that started igdl.
+fn is_standalone_console(
+    arg_count: usize,
+    console_processes: Option<u32>,
+    interactive: bool,
+) -> bool {
+    arg_count <= 1 && console_processes == Some(1) && interactive
+}
+
+/// How many processes share igdl's console; `None` without a console.
+#[cfg(windows)]
+fn console_process_count() -> Option<u32> {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+    let mut ids = [0u32; 4];
+    // SAFETY: the pointer and length describe `ids`, a live, writable buffer.
+    // When more processes are attached the call returns their count and
+    // writes nothing.
+    let count = unsafe { GetConsoleProcessList(ids.as_mut_ptr(), ids.len() as u32) };
+    (count > 0).then_some(count)
+}
+
+/// Only Windows closes a console together with its last process.
+#[cfg(not(windows))]
+fn console_process_count() -> Option<u32> {
+    None
+}
+
+/// The help followed by a note that igdl is a command-line tool.
+fn standalone_help() -> String {
+    format!("{}\n{STANDALONE_NOTE}\n", Cli::command().render_help())
+}
+
+/// Shows [`standalone_help`] on `out` and waits for Enter on `input` so the
+/// window stays open until it has been read. Returns the usage exit code,
+/// like a missing command.
+fn explain_and_wait(out: &mut impl Write, input: &mut impl BufRead) -> u8 {
+    // Nothing useful can be done if the console cannot be written to.
+    let _ = write!(
+        out,
+        "{}\nPress Enter to close this window.",
+        standalone_help()
+    );
+    let _ = out.flush();
+    let _ = input.read_line(&mut String::new());
+    EXIT_USAGE
+}
+
 /// Exit code for an error that aborted the whole command.
 pub fn exit_code(err: &Error) -> u8 {
     match err.kind() {
@@ -338,6 +438,7 @@ pub fn exit_code(err: &Error) -> u8 {
 
 async fn execute(cli: Cli, cancel: &CancellationToken) -> Result<Report> {
     let settings = config::load(cli.global.config.as_deref())?;
+    log_settings_source(cli.global.config.as_deref());
     let global = &cli.global;
     match &cli.command {
         Command::Get(args) => {
@@ -402,6 +503,18 @@ async fn execute(cli: Cli, cancel: &CancellationToken) -> Result<Report> {
             let interval = Duration::from_millis(args.interval.max(100));
             app::watch(&options, args.start, interval, cancel).await
         }
+    }
+}
+
+/// Says (at `-v`) which settings file was read, so a misplaced one is noticed.
+fn log_settings_source(explicit: Option<&Path>) {
+    match explicit
+        .map(Path::to_path_buf)
+        .or_else(config::default_config_path)
+    {
+        Some(path) if path.is_file() => tracing::info!("settings file: {}", path.display()),
+        Some(path) => tracing::info!("no settings file at {}; using defaults", path.display()),
+        None => tracing::info!("no settings file location (no home directory); using defaults"),
     }
 }
 
@@ -559,6 +672,10 @@ fn init_logging(global: &GlobalArgs) {
         .with_env_filter(filter)
         .with_target(global.verbose > 1)
         .without_time()
+        // Colours only where they render: stderr is a terminal, NO_COLOR is
+        // unset (CLICOLOR/CLICOLOR_FORCE honoured) and, on Windows, virtual
+        // terminal processing could be enabled; plain text otherwise.
+        .with_ansi(console::colors_enabled_stderr())
         .with_writer(|| StderrWriter)
         .try_init();
 }
@@ -580,7 +697,6 @@ fn spawn_interrupt_handler(cancel: CancellationToken) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
 
     #[test]
     fn cli_definition_is_valid() {
@@ -614,6 +730,84 @@ mod tests {
         assert!(Cli::try_parse_from(["igdl", "start", "-j", "0"]).is_err());
         assert!(Cli::try_parse_from(["igdl", "start", "-j", "33"]).is_err());
         assert!(Cli::try_parse_from(["igdl", "start", "-j", "8"]).is_ok());
+    }
+
+    fn arg_help(id: &str) -> String {
+        Cli::command()
+            .get_arguments()
+            .find(|arg| arg.get_id() == id)
+            .and_then(|arg| arg.get_help())
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn help_names_the_real_default_config_path() {
+        assert_eq!(arg_help("config"), config_help());
+        let expected = config::default_config_path()
+            .map_or_else(|| CONFIG_PATH_HINT.to_string(), |p| p.display().to_string());
+        assert!(config_help().contains(&expected), "{}", config_help());
+        assert!(expected.ends_with("config.toml"));
+        assert!(!config_help().contains("<config dir>"));
+    }
+
+    #[test]
+    fn help_names_the_real_default_data_dir() {
+        assert_eq!(arg_help("data_dir"), data_dir_help());
+        let expected = config::default_data_dir()
+            .map_or_else(|_| DATA_DIR_HINT.to_string(), |p| p.display().to_string());
+        assert!(data_dir_help().contains(&expected), "{}", data_dir_help());
+        assert!(!data_dir_help().contains("platform data dir"));
+    }
+
+    #[test]
+    fn only_a_bare_start_in_a_console_of_its_own_pauses() {
+        assert!(is_standalone_console(1, Some(1), true));
+        // Arguments given (e.g. `igdl --help` from a shortcut): normal behaviour.
+        assert!(!is_standalone_console(2, Some(1), true));
+        // Started from a shell, which shares the console.
+        assert!(!is_standalone_console(1, Some(2), true));
+        // No console at all, or not Windows.
+        assert!(!is_standalone_console(1, None, true));
+        // Started by a program with stdin/stderr redirected: nobody to press Enter.
+        assert!(!is_standalone_console(1, Some(1), false));
+    }
+
+    #[test]
+    fn standalone_help_points_to_the_window() {
+        let text = standalone_help();
+        assert!(text.contains("Usage: igdl"), "{text}");
+        assert!(text.contains("command-line tool"), "{text}");
+        assert!(text.contains("igdl-gui.exe"), "{text}");
+    }
+
+    #[test]
+    fn standalone_start_shows_the_help_and_waits_for_one_enter() {
+        let mut out = Vec::new();
+        let mut input = std::io::Cursor::new(b"\nget something\n".to_vec());
+        assert_eq!(explain_and_wait(&mut out, &mut input), EXIT_USAGE);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with(&standalone_help()), "{text}");
+        assert!(
+            text.ends_with("Press Enter to close this window."),
+            "{text}"
+        );
+        // Exactly the one line (the Enter) was read.
+        assert_eq!(input.position(), 1);
+    }
+
+    #[test]
+    fn standalone_start_returns_when_input_is_closed() {
+        let mut out = Vec::new();
+        let mut input = std::io::Cursor::new(Vec::new());
+        assert_eq!(explain_and_wait(&mut out, &mut input), EXIT_USAGE);
+        assert!(!out.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn console_check_is_windows_only() {
+        assert_eq!(console_process_count(), None);
     }
 
     #[test]
