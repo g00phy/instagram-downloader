@@ -172,7 +172,12 @@ impl Controller {
     /// crawl filters, template and download folder.
     fn request_options(&self, request: &GrabRequest) -> Result<Options> {
         let crawl = CrawlArgs {
-            out: (!request.out_dir.as_os_str().is_empty()).then(|| request.out_dir.clone()),
+            // No folder in the request: the window's default, not the current directory.
+            out: Some(if request.out_dir.as_os_str().is_empty() {
+                self.options.out_dir.clone()
+            } else {
+                request.out_dir.clone()
+            }),
             include: request
                 .sections
                 .iter()

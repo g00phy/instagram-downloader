@@ -4,9 +4,8 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, PoisonError};
 
-use super::runner::{Controller, Internal, current_client};
+use super::runner::{Controller, Internal, base_options, current_client};
 use crate::app::{self, NO_COOKIES_WARNING, Options};
-use crate::cli::{self, DownloadArgs};
 use crate::config::Settings;
 use crate::download::Downloader;
 use crate::error::{Error, ErrorKind, Result};
@@ -144,8 +143,7 @@ impl Controller {
     /// ones re-sent so the form can reset.
     pub(super) fn apply_settings(&mut self, settings: Settings) {
         let prepared = settings.validate().and_then(|()| {
-            let options =
-                cli::resolve_options(&self.global, &settings, None, &DownloadArgs::default())?;
+            let options = base_options(&self.global, &settings)?;
             let setup = build_client(&options)?;
             let downloader = Downloader::new(options.download.clone())?;
             Ok((options, setup, downloader))

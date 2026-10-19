@@ -128,8 +128,12 @@ pub enum Update {
     Settings {
         settings: Box<Settings>,
         config_path: Option<PathBuf>,
-        /// Download root used when the settings have none (current directory).
+        /// The download root: the settings' folder, else the window's default
+        /// (`Downloads/Instagram`, see the controller).
         default_out_dir: PathBuf,
+        /// The cookie file named by `--cookies` / `IGDL_COOKIES`, which is used
+        /// instead of `settings.cookies` while it is set.
+        cookies_override: Option<PathBuf>,
     },
     /// The whole download list, after any change (throttled to a few per second).
     Queue(Arc<Queue>),

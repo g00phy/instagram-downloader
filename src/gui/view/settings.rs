@@ -129,7 +129,8 @@ impl SettingsForm {
     }
 }
 
-/// An unchanged path keeps its original value; empty means unset.
+/// An unchanged path keeps its original value; empty means unset. See
+/// [`clean_path`] for what is trimmed.
 fn path_field(text: &str, original: &Option<PathBuf>) -> Option<PathBuf> {
     if original
         .as_deref()
@@ -137,8 +138,27 @@ fn path_field(text: &str, original: &Option<PathBuf>) -> Option<PathBuf> {
     {
         return original.clone();
     }
-    let text = text.trim();
+    let text = clean_path(text);
     (!text.is_empty()).then(|| PathBuf::from(text))
+}
+
+/// A typed or pasted path without surrounding whitespace and without one pair
+/// of surrounding double quotes, which Explorer's "Copy as path" adds (a Windows
+/// path cannot contain `"`).
+pub(super) fn clean_path(text: &str) -> &str {
+    let text = text.trim();
+    text.strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(text)
+}
+
+/// Where a folder dialog for the typed `text` starts: that folder or, while it
+/// does not exist yet (the default `Downloads/Instagram` before the first
+/// download), its nearest existing parent; `None` when nothing of it exists.
+pub(super) fn dialog_folder(text: &str) -> Option<&Path> {
+    Path::new(clean_path(text))
+        .ancestors()
+        .find(|dir| !dir.as_os_str().is_empty() && dir.is_dir())
 }
 
 /// An unchanged text keeps its original value; empty means unset.
@@ -292,7 +312,9 @@ impl SettingsView {
                 }
                 let dirty = form.is_dirty();
                 let saved = form.validate();
-                let can_check = !form.cookies.trim().is_empty() && (!dirty || saved.is_ok());
+                let has_cookies =
+                    !clean_path(&form.cookies).is_empty() || state.cookies_override.is_some();
+                let can_check = has_cookies && (!dirty || saved.is_ok());
                 if ui
                     .add_enabled(can_check, Button::new("Check login"))
                     .on_hover_text("Save, then ask Instagram which account the cookies belong to")
@@ -305,6 +327,9 @@ impl SettingsView {
                     out.send(Command::CheckAccount);
                 }
             });
+            if let Some(path) = &state.cookies_override {
+                ui.colored_label(palette.amber, cookies_override_note(path));
+            }
             account_line(ui, state, palette);
         });
         ui.end_row();
@@ -319,8 +344,8 @@ impl SettingsView {
             .labelled_by(label.id);
             if ui.button("Browse…").clicked() {
                 let mut dialog = rfd::FileDialog::new().set_title("Default download folder");
-                if !form.out_dir.trim().is_empty() {
-                    dialog = dialog.set_directory(form.out_dir.trim());
+                if let Some(dir) = dialog_folder(&form.out_dir) {
+                    dialog = dialog.set_directory(dir);
                 }
                 if let Some(dir) = dialog.pick_folder() {
                     form.out_dir = dir.display().to_string();
@@ -490,12 +515,20 @@ fn pick_file(current: &str) -> Option<PathBuf> {
         .set_title("Instagram cookie file")
         .add_filter("Cookie export", &["txt", "json"])
         .add_filter("All files", &["*"]);
-    if let Some(dir) = Path::new(current.trim()).parent()
+    if let Some(dir) = Path::new(clean_path(current)).parent()
         && dir.is_dir()
     {
         dialog = dialog.set_directory(dir);
     }
     dialog.pick_file()
+}
+
+/// Why the cookie field has no effect while `--cookies` / `IGDL_COOKIES` is set.
+fn cookies_override_note(path: &Path) -> String {
+    format!(
+        "Using {} from IGDL_COOKIES or --cookies; this field is ignored while it is set",
+        path.display()
+    )
 }
 
 fn account_line(ui: &mut Ui, state: &ViewState, palette: Palette) {
@@ -587,6 +620,54 @@ mod tests {
         assert_eq!(settings.limit_rate, None);
         assert_eq!(settings.out_dir, None);
         assert_eq!(settings.data_dir, full().data_dir, "not editable, kept");
+    }
+
+    #[test]
+    fn pasted_paths_lose_whitespace_and_one_pair_of_quotes() {
+        assert_eq!(
+            clean_path(r#"  "C:\Users\me\cookies.txt" "#),
+            r"C:\Users\me\cookies.txt"
+        );
+        assert_eq!(clean_path(" /data/insta \n"), "/data/insta");
+        assert_eq!(clean_path(r#""D:\My Insta""#), r"D:\My Insta");
+        assert_eq!(clean_path(r#"""x"""#), r#""x""#, "only one pair");
+        assert_eq!(clean_path(r#""x"#), r#""x"#, "unpaired quotes stay");
+        assert_eq!(clean_path(r#"""#), r#"""#);
+        assert_eq!(clean_path(r#""""#), "");
+
+        let form = SettingsForm {
+            cookies: r#""C:\Users\me\cookies.txt""#.into(),
+            out_dir: r#" "D:\My Insta" "#.into(),
+            ..SettingsForm::default()
+        };
+        let settings = form.validate().unwrap();
+        assert_eq!(
+            settings.cookies,
+            Some(PathBuf::from(r"C:\Users\me\cookies.txt"))
+        );
+        assert_eq!(settings.out_dir, Some(PathBuf::from(r"D:\My Insta")));
+
+        let form = SettingsForm {
+            out_dir: r#""""#.into(),
+            ..SettingsForm::new(&full())
+        };
+        assert_eq!(form.settings().out_dir, None, "empty quotes unset it");
+    }
+
+    #[test]
+    fn folder_dialogs_start_in_the_nearest_existing_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let text = root.path().display().to_string();
+        assert_eq!(dialog_folder(&text), Some(root.path()));
+        let missing = root.path().join("Downloads").join("Instagram");
+        assert_eq!(
+            dialog_folder(&format!(" \"{}\" ", missing.display())),
+            Some(root.path()),
+            "a folder that does not exist yet opens its parent"
+        );
+        assert_eq!(dialog_folder(""), None);
+        assert_eq!(dialog_folder(r#""""#), None);
+        assert_eq!(dialog_folder("igdl-no-such-folder"), None);
     }
 
     #[test]
