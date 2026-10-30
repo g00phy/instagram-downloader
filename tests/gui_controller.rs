@@ -19,8 +19,8 @@ use igdl::naming::DEFAULT_TEMPLATE;
 use igdl::queue::{Queue, QueueStore};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use wiremock::matchers::{method, path, query_param, query_param_is_missing};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::matchers::{method, path};
+use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 /// A distinctive fake session cookie: it must never show up in the window.
 const SESSION: &str = "SESSIONID-DISTINCTIVE-7f3a9c";
@@ -742,36 +742,22 @@ async fn grabbing_a_carousel_stages_its_files() {
 #[tokio::test]
 async fn profile_grab_respects_the_limit() {
     let env = Env::new().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/users/web_profile_info/"))
-        .and(query_param("username", "testuser"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {"user": {"id": "123", "username": "testuser", "full_name": "Test",
-                              "is_private": false, "followed_by_viewer": false}},
-            "status": "ok"
-        })))
-        .mount(&env.server)
-        .await;
+    mount_profile_page(&env, "testuser", "123").await;
     let posts = [
         single_post(&env, "Aaaaaaaaaa1", "3300000000000000101", TAKEN_AT + 300),
         single_post(&env, "Aaaaaaaaaa2", "3300000000000000102", TAKEN_AT + 200),
         single_post(&env, "Aaaaaaaaaa3", "3300000000000000103", TAKEN_AT + 100),
     ];
-    Mock::given(method("GET"))
-        .and(path("/api/v1/feed/user/123/"))
-        .and(query_param_is_missing("max_id"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [posts[0], posts[1]], "more_available": true, "next_max_id": "cursor-2",
-            "status": "ok"
-        })))
+    Mock::given(method("POST"))
+        .and(path("/graphql/query"))
+        .and(PostsQuery(Value::Null))
+        .respond_with(posts_page(&posts[..2], Some("cursor-2")))
         .mount(&env.server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/feed/user/123/"))
-        .and(query_param("max_id", "cursor-2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [posts[2]], "more_available": false, "status": "ok"
-        })))
+    Mock::given(method("POST"))
+        .and(path("/graphql/query"))
+        .and(PostsQuery(json!("cursor-2")))
+        .respond_with(posts_page(&posts[2..], None))
         .mount(&env.server)
         .await;
     let mut ui = env.start(Cookies::Valid);
@@ -860,7 +846,9 @@ async fn login_required_invalidates_the_account_and_skips_the_rest() {
             .iter()
             .all(|u| !matches!(u, Update::Staged(s) if !s.is_empty()))
     );
-    assert_eq!(env.requests_to("/api/v1/users/web_profile_info").await, 0);
+    for profile in ["/second/", "/third/"] {
+        assert_eq!(env.requests_to(profile).await, 0, "{profile} was requested");
+    }
     // The API did receive the cookies.
     let requests = env.server.received_requests().await.unwrap();
     let cookie = requests[0].headers.get("cookie").unwrap().to_str().unwrap();
@@ -1075,6 +1063,49 @@ async fn failed_items_can_be_retried() {
     ui.finish();
 }
 
+/// A profile page of the web app: the profile id and the GraphQL tokens.
+async fn mount_profile_page(env: &Env, username: &str, id: &str) {
+    let page = format!(
+        r#"<!DOCTYPE html><html><head><script type="application/json" id="__eqmc">{{"f":"FAKE-DTSG","l":"FakeLsd"}}</script></head><body><script type="application/json">{{"require":[["PolarisProfilePageContentQuery",{{"params":{{"username":"{username}"}}}},{{"profile_id":"{id}"}}]]}}</script></body></html>"#
+    );
+    Mock::given(method("GET"))
+        .and(path(format!("/{username}/")))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(page, "text/html"))
+        .mount(&env.server)
+        .await;
+}
+
+/// Matches the posts-grid GraphQL request with this `after` cursor.
+struct PostsQuery(Value);
+
+impl Match for PostsQuery {
+    fn matches(&self, request: &Request) -> bool {
+        let form: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(&request.body)
+                .into_owned()
+                .collect();
+        let variables: Value = form
+            .get("variables")
+            .and_then(|v| serde_json::from_str(v).ok())
+            .unwrap_or(Value::Null);
+        form.get("fb_api_req_friendly_name").map(String::as_str)
+            == Some("PolarisProfilePostsTabContentQuery_connection")
+            && variables.get("after") == Some(&self.0)
+    }
+}
+
+/// One page of the posts grid.
+fn posts_page(items: &[Value], next: Option<&str>) -> ResponseTemplate {
+    let edges: Vec<Value> = items.iter().map(|item| json!({"node": item})).collect();
+    ResponseTemplate::new(200).set_body_json(json!({
+        "data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {
+            "edges": edges,
+            "page_info": {"has_next_page": next.is_some(), "end_cursor": next}
+        }},
+        "status": "ok"
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Account and settings
 
@@ -1082,9 +1113,9 @@ async fn failed_items_can_be_retried() {
 async fn check_account_reports_the_logged_in_user() {
     let env = Env::new().await;
     Mock::given(method("GET"))
-        .and(path("/api/v1/users/999/info/"))
+        .and(path("/api/v1/accounts/edit/web_form_data/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "user": {"pk": "999", "username": "me_myself", "is_private": true},
+            "form_data": {"username": "me_myself", "email": "me@example.invalid"},
             "status": "ok"
         })))
         .mount(&env.server)
@@ -1106,7 +1137,7 @@ async fn check_account_reports_the_logged_in_user() {
 #[tokio::test]
 async fn rate_limited_account_check_is_unverified_not_invalid() {
     let env = Env::new().await;
-    for route in ["/api/v1/accounts/current_user/", "/api/v1/users/999/info/"] {
+    for route in ["/api/v1/accounts/edit/web_form_data/", "/graphql/query/"] {
         Mock::given(method("GET"))
             .and(path(route))
             .respond_with(ResponseTemplate::new(429))
