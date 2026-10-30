@@ -1137,7 +1137,7 @@ async fn check_account_reports_the_logged_in_user() {
 #[tokio::test]
 async fn rate_limited_account_check_is_unverified_not_invalid() {
     let env = Env::new().await;
-    for route in ["/api/v1/accounts/edit/web_form_data/", "/graphql/query/"] {
+    for route in ["/api/v1/accounts/edit/web_form_data/", "/graphql/query"] {
         Mock::given(method("GET"))
             .and(path(route))
             .respond_with(ResponseTemplate::new(429))

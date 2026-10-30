@@ -439,7 +439,8 @@ impl Feed {
                 "__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider": true,
                 "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": true,
                 "__relay_internal__pv__PolarisThreadsStyleCommentsEnabledrelayprovider": false,
-                "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider": false
+                "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider": false,
+                "__relay_internal__pv__PolarisSEOIsCrawlerrelayprovider": false
             }),
             Feed::Reels => json!({
                 "after": after,
@@ -622,13 +623,14 @@ async fn crawl_feed(
 }
 
 /// Whether a failed `feed/reels_media/` call is worth the GraphQL fallback:
-/// a 5xx, a redirect, or a body that is not the expected JSON.
+/// any HTTP error of that retired endpoint (5xx, redirect, 400, 401/403
+/// without a login signal), a missing endpoint, or an unexpected body. Real
+/// login/checkpoint signals, rate limits and cancellation still end the crawl.
 fn rest_reels_fallback(err: &Error) -> bool {
-    match err {
-        Error::Http { status, .. } => *status >= 500 || (300..400).contains(status),
-        Error::Parse(_) => true,
-        _ => false,
-    }
+    matches!(
+        err,
+        Error::Http { .. } | Error::Parse(_) | Error::NotFound(_)
+    )
 }
 
 /// `/api/v1/feed/reels_media/?reel_ids=A&reel_ids=B…` (one attempt: the
@@ -641,6 +643,7 @@ async fn rest_reels(client: &Client, reel_ids: &[&str]) -> Result<ReelsMedia> {
     let path = format!("/api/v1/feed/reels_media/?{query}");
     let options = CallOptions {
         retry_transient: false,
+        forbidden_is_auth: false,
         ..CallOptions::default()
     };
     let value = client.api(&ApiRequest::get(&path).options(options)).await?;
@@ -951,12 +954,14 @@ mod tests {
             status,
             message: String::new(),
         };
-        assert!(rest_reels_fallback(&http(500)));
-        assert!(rest_reels_fallback(&http(302)));
+        for status in [500, 302, 400, 401, 403, 404] {
+            assert!(rest_reels_fallback(&http(status)), "{status}");
+        }
         assert!(rest_reels_fallback(&Error::Parse("html".into())));
-        assert!(!rest_reels_fallback(&http(404)));
+        assert!(rest_reels_fallback(&Error::NotFound("x".into())));
         assert!(!rest_reels_fallback(&Error::RateLimited("x".into())));
         assert!(!rest_reels_fallback(&Error::Auth("x".into())));
+        assert!(!rest_reels_fallback(&Error::Cancelled));
     }
 
     #[test]

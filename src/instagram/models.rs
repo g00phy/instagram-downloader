@@ -266,13 +266,25 @@ pub struct ReelsMedia {
 }
 
 impl ReelsMedia {
-    /// The reel with id `reel_id` (from `reels{}` or `reels_media[]`).
+    /// The reel with id `reel_id` (from `reels{}` or `reels_media[]`). The
+    /// `highlight:` prefix is optional on either side: GraphQL answers may give
+    /// a highlight's id as the bare number (gallery-dl 1.32.14+ `rpartition(":")`).
     pub fn find(&self, reel_id: &str) -> Option<&Reel> {
-        self.reels.get(reel_id).or_else(|| {
-            self.reels_media
-                .iter()
-                .find(|reel| reel.id.as_deref() == Some(reel_id))
-        })
+        let bare = |id: &str| id.strip_prefix("highlight:").unwrap_or(id).to_string();
+        let wanted = bare(reel_id);
+        self.reels
+            .get(reel_id)
+            .or_else(|| {
+                self.reels
+                    .iter()
+                    .find(|(id, _)| bare(id) == wanted)
+                    .map(|(_, reel)| reel)
+            })
+            .or_else(|| {
+                self.reels_media
+                    .iter()
+                    .find(|reel| reel.id.as_deref().is_some_and(|id| bare(id) == wanted))
+            })
     }
 
     /// The reel with id `reel_id`, else the first one when exactly one reel was
@@ -288,6 +300,24 @@ impl ReelsMedia {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn highlight_reels_match_with_or_without_the_prefix() {
+        let media: ReelsMedia = parse(
+            json!({"reels_media": [{"id": "1795", "items": []}, {"id": "highlight:42", "items": []}]}),
+            "stories",
+        )
+        .unwrap();
+        assert_eq!(
+            media.find("highlight:1795").and_then(|r| r.id.as_deref()),
+            Some("1795")
+        );
+        assert_eq!(
+            media.find("42").and_then(|r| r.id.as_deref()),
+            Some("highlight:42")
+        );
+        assert!(media.find("highlight:7").is_none());
+    }
 
     #[test]
     fn ids_accept_numbers_and_strings() {

@@ -97,14 +97,14 @@ are fetched **without cookies**.
 
 | Purpose | Request | Data |
 |---|---|---|
-| Who am I | `GET /api/v1/accounts/edit/web_form_data/`, then `GET /graphql/query/?query_hash=d6f4427fbe92d846298cf93df0b937d3` (one quick attempt each) | `form_data.username` (read nothing else: the body holds e-mail, phone, birthday); `data.user.username`, `null` = not logged in |
+| Who am I | `GET /api/v1/accounts/edit/web_form_data/`, then `GET /graphql/query?query_hash=d6f4427fbe92d846298cf93df0b937d3` (one quick attempt each, never queued behind other requests) | `form_data.username` (read nothing else: the body holds e-mail, phone, birthday); `data.user.username`, `null` = not logged in |
 | Profile | `GET /{username}/` (page navigation) | `"profile_id":"N"`, `is_private`, GraphQL tokens `lsd`/`fb_dtsg` (`__eqmc` keys `l`/`f`), `rsrc.php` bundle URLs |
 | Post | `GET /api/v1/media/{media_id}/info/` | `items[0]`; a redirect to `/` or the login page = cookies invalid |
 | Posts | GraphQL `PolarisProfilePostsTabContentQuery_connection` | `xdt_api__v1__feed__user_timeline_graphql_connection.edges[].node` (v1 media items), `page_info` |
 | Reels | GraphQL `PolarisProfileReelsTabContentQuery_connection` | shortcodes, then `media/{id}/info` per reel |
 | Tagged | GraphQL `PolarisProfileTaggedTabContentQuery_connection` | shortcodes, then `media/{id}/info` per post |
 | Highlights list | GraphQL `PolarisProfileStoryHighlightsTrayContentQuery` | `highlight:N` ids and titles |
-| Stories, highlight items | `GET /api/v1/feed/reels_media/?reel_ids=…`, on 5xx/redirect/HTML the GraphQL `PolarisStoriesV3ReelPageGalleryQuery` | reel items (v1 media items) |
+| Stories, highlight items | `GET /api/v1/feed/reels_media/?reel_ids=…`, on any HTTP error or unexpected body the GraphQL `PolarisStoriesV3ReelPageGalleryQuery` | reel items (v1 media items); highlight reels may be named `highlight:N` or just `N` |
 
 GraphQL calls are form-encoded POSTs shaped like gallery-dl's `_prepare_graphql`
 (`doc_id`, `variables`, `fb_api_req_friendly_name`, `lsd`, `fb_dtsg`, …; headers
@@ -113,7 +113,10 @@ days.** Priority: `[doc_ids]` in `config.toml` > `doc_ids.json` in the data dir
 (discovered from the profile page's `rsrc.php` bundles, `__d("<Name>_instagramRelayOperation",…exports="<id>")`,
 kept 24 h) > the built-in defaults in `src/instagram/doc_ids.rs`. An error inside an
 HTTP 200 (`errors[]`, persisted query not found, …) means the id is outdated: one
-rediscovery, then a `Parse` error naming the query.
+rediscovery, then a `Parse` error naming the query. A GraphQL `feedback_required`
+gets the same retry first (stale ids are answered that way); only if the retry is
+refused too is it reported as an account restriction. `av` is the page's
+`IG_USER_EIMU` when present.
 
 Media item fields: `pk` (number or string), `id` (`"{pk}_{owner_pk}"`), `code`
 (shortcode), `media_type` (1 image, 2 video, 8 carousel), `taken_at` (unix secs),
@@ -131,9 +134,11 @@ Pacing and errors:
 * API calls are spaced by `api_delay` (default 6 s) plus a random 0–100 %; the first
   call is not delayed; pages and static scripts are exempt (still sequential).
 * HTTP 429 → a **global** pause (`rate_limit_wait`, 60 s) for every request, one
-  retry, then `RateLimited` ("wait 10–30 minutes"). The login check never waits
+  retry, then `RateLimited` ("wait 10–30 minutes"); a 429 within ten pause lengths
+  of the previous one also stops the job. The login check never waits
   (one attempt per step) and reports a rate limit as *unverified*, not as bad cookies.
-* 401 "Please wait a few minutes" and `feedback_required` → `RateLimited`, not retried.
+* 401 "Please wait a few minutes" (even with `require_login: true`) and
+  `feedback_required` → `RateLimited`, not retried.
 * Redirect to `/accounts/login/`, `login_required`, `require_login: true` → `Auth`;
   `checkpoint_required` / `challenge_required` → `Auth` ("confirm the login in your
   browser").
@@ -147,7 +152,8 @@ Built from gallery-dl 1.32.17, instaloader master and issue reports up to Octobe
 tested only against mocks. When live behaviour differs, suspect first:
 * the built-in doc ids (refresh them from gallery-dl's `QUERIES` table or set
   `[doc_ids]`), and the `rsrc.php` discovery pattern;
-* the GraphQL form fields gallery-dl sends that igdl omits (`av`, `__rev`, `__hsi`);
+* the GraphQL form fields gallery-dl hard-codes and igdl takes from the page or
+  omits (`av`, `__rev`, `__hsi`);
 * `web_form_data` and the `query_hash` probe for the login check;
 * `feed/reels_media` on www (gallery-dl replaced it; igdl keeps it with a fallback);
 * progressive `video_versions` only; DASH manifests are ignored.

@@ -79,7 +79,7 @@ const WEB_FORM_DATA: &str = "/api/v1/accounts/edit/web_form_data/";
 
 /// "Who am I" step 2: instaloader's `test_login` query (`data.user.username`).
 const LOGIN_PROBE: &str =
-    "/graphql/query/?query_hash=d6f4427fbe92d846298cf93df0b937d3&variables=%7B%7D";
+    "/graphql/query?query_hash=d6f4427fbe92d846298cf93df0b937d3&variables=%7B%7D";
 
 /// Longest server text (in characters) copied into an error message.
 const MAX_SERVER_TEXT: usize = 200;
@@ -1005,7 +1005,7 @@ impl Client {
         let json = parse_json_object(&raw.body);
         if let Some(json) = &json
             && !(status.is_success() && json.get("status").and_then(Value::as_str) == Some("ok"))
-            && let Some(failure) = self.classify_json_signal(json, code)
+            && let Some(failure) = self.classify_json_signal(json, code, request.graphql)
         {
             return Err(failure);
         }
@@ -1015,6 +1015,7 @@ impl Client {
                 message: self.error_message(json.as_ref(), &raw.body, "Instagram server error"),
             }));
         }
+        // Only the login form itself; other HTML (the home page) is ambiguous.
         if json.is_none() && web::looks_like_login_page(&raw.body) {
             return Err(Failure::Fatal(Error::Auth(NOT_LOGGED_IN.into())));
         }
@@ -1107,7 +1108,10 @@ impl Client {
     }
 
     /// Login / checkpoint / restriction signals inside a JSON body (any status).
-    fn classify_json_signal(&self, json: &Value, code: u16) -> Option<Failure> {
+    /// For GraphQL answers `feedback_required` is left to the caller: a stale doc
+    /// id gets that answer too (instaloader `structures.py`), so it first goes
+    /// through the outdated-query retry.
+    fn classify_json_signal(&self, json: &Value, code: u16, graphql: bool) -> Option<Failure> {
         let message = json_message(json).unwrap_or_default().to_ascii_lowercase();
         let error_type = json
             .get("error_type")
@@ -1118,7 +1122,7 @@ impl Client {
         if has("checkpoint_required") || has("challenge_required") {
             return Some(Failure::Fatal(Error::Auth(CHECKPOINT.into())));
         }
-        if has("feedback_required") {
+        if !graphql && has("feedback_required") {
             return Some(Failure::Fatal(Error::RateLimited(FEEDBACK_REQUIRED.into())));
         }
         // Before the login check: Instagram's throttle answer is

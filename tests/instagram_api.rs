@@ -1469,6 +1469,11 @@ async fn stories_fall_back_to_graphql_when_reels_media_fails() {
         ResponseTemplate::new(500).set_body_string("Internal Server Error"),
         ResponseTemplate::new(302).insert_header("location", "https://www.instagram.com/"),
         ResponseTemplate::new(200).set_body_raw("<html><body>home</body></html>", "text/html"),
+        // The retired endpoint refusing is not a cookie problem.
+        ResponseTemplate::new(403)
+            .set_body_json(json!({"message": "useragent mismatch", "status": "fail"})),
+        ResponseTemplate::new(400)
+            .set_body_json(json!({"message": "bad request", "status": "fail"})),
     ] {
         let server = MockServer::start().await;
         let cdn = server.uri();
@@ -1675,6 +1680,137 @@ async fn highlight_items_switch_to_graphql_after_one_failure() {
         .map(|r| variables_of(r)["initial_reel_id"].clone())
         .collect();
     assert_eq!(chunks, vec![json!("highlight:1"), json!("highlight:6")]);
+}
+
+#[tokio::test]
+async fn highlight_reels_with_bare_numeric_ids_are_matched() {
+    let server = MockServer::start().await;
+    let cdn = server.uri();
+    mount_profile(&server, "alice", USER_ID, None).await;
+    mount_tray(&server, 2).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/feed/reels_media/"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let responder_cdn = cdn.clone();
+    Mock::given(method("POST"))
+        .and(path("/graphql/query"))
+        .and(gql(&doc_ids::STORIES))
+        .respond_with(move |request: &Request| {
+            let nodes: Vec<Value> = variables_of(request)["reel_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| {
+                    let number = id.as_str().unwrap().trim_start_matches("highlight:");
+                    let mut reel = highlight_reel(&responder_cdn, number.parse().unwrap());
+                    // The web app's answer may name the reel by its bare number.
+                    reel["id"] = json!(number);
+                    reel
+                })
+                .collect();
+            ok(connection(STORIES_ROOT, nodes, None))
+        })
+        .mount(&server)
+        .await;
+    let resolved = run(
+        &client(&server),
+        &profile_target(Some(ProfileSection::Highlights)),
+        &opts(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolved.files.len(), 2, "{:?}", resolved.notes);
+    assert_eq!(resolved.files[1].highlight.as_deref(), Some("Trip 2"));
+}
+
+#[tokio::test]
+async fn graphql_feedback_required_from_a_stale_doc_id_is_retried_as_outdated() {
+    for still_refused in [false, true] {
+        let server = MockServer::start().await;
+        let cdn = server.uri();
+        let cache_dir = tempfile::tempdir().unwrap();
+        write_cache(
+            cache_dir.path(),
+            doc_ids::POSTS.name,
+            "1110001",
+            now() - 3600,
+        );
+        mount_profile(&server, "alice", USER_ID, None).await;
+        let refused = ResponseTemplate::new(400).set_body_json(json!({
+            "message": "feedback_required", "spam": true, "status": "fail"
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql/query"))
+            .and(gql(&doc_ids::POSTS).doc("1110001"))
+            .respond_with(refused.clone())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql/query"))
+            .and(gql(&doc_ids::POSTS).doc(doc_ids::POSTS.default_doc_id))
+            .respond_with(if still_refused {
+                refused
+            } else {
+                posts_page(vec![image_item(&cdn, 1, "C1", 10)], None)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::new(
+            ClientConfig {
+                cache_dir: Some(cache_dir.path().to_path_buf()),
+                ..config(&server)
+            },
+            Some(jar()),
+        )
+        .unwrap();
+        let result = run(&client, &profile_target(None), &opts()).await;
+        if still_refused {
+            let err = result.unwrap_err();
+            assert!(
+                matches!(&err, Error::RateLimited(m) if m.contains("feedback_required")),
+                "{err:?}"
+            );
+        } else {
+            assert_eq!(keys(&result.unwrap()), vec!["1"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn graphql_sends_the_viewer_id_as_av_when_the_page_has_it() {
+    let server = MockServer::start().await;
+    let cdn = server.uri();
+    let page = profile_html(&server, "alice", USER_ID, None).replace(
+        "</head>",
+        r#"<script>{"IG_USER_EIMU":"17841400000000042"}</script></head>"#,
+    );
+    Mock::given(method("GET"))
+        .and(path("/alice/"))
+        .respond_with(html(page))
+        .mount(&server)
+        .await;
+    mount_posts(
+        &server,
+        Value::Null,
+        vec![image_item(&cdn, 1, "C1", 10)],
+        None,
+    )
+    .await;
+    run(&client(&server), &profile_target(None), &opts())
+        .await
+        .unwrap();
+    let request = &requests_to(&server, "/graphql/query").await[0];
+    let form: HashMap<String, String> = url::form_urlencoded::parse(&request.body)
+        .into_owned()
+        .collect();
+    assert_eq!(
+        form.get("av").map(String::as_str),
+        Some("17841400000000042")
+    );
 }
 
 #[tokio::test]
@@ -2555,7 +2691,7 @@ async fn mount_form(server: &MockServer, template: ResponseTemplate, calls: u64)
 
 async fn mount_probe(server: &MockServer, template: ResponseTemplate, calls: u64) {
     Mock::given(method("GET"))
-        .and(path("/graphql/query/"))
+        .and(path("/graphql/query"))
         .and(query_param("query_hash", PROBE_HASH))
         .and(query_param("variables", "{}"))
         .respond_with(template)

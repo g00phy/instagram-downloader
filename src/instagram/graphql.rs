@@ -15,7 +15,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
-use crate::instagram::client::{ApiRequest, CallOptions, Client};
+use crate::instagram::client::{ApiRequest, CallOptions, Client, FEEDBACK_REQUIRED};
 use crate::instagram::doc_ids::{DocIdState, MAX_BUNDLES, OPERATIONS, Operation, extract_doc_ids};
 use crate::instagram::web::Tokens;
 use crate::redact;
@@ -93,6 +93,10 @@ impl Client {
                         doc_id = next;
                         retried = true;
                         continue;
+                    }
+                    if text.to_ascii_lowercase().contains("feedback_required") {
+                        // Still refused after another doc id: the account, not the query.
+                        return Err(Error::RateLimited(FEEDBACK_REQUIRED.to_string()));
                     }
                     let hint = if source == Source::Config {
                         "update or remove it in [doc_ids] of config.toml"
@@ -305,8 +309,8 @@ async fn save_cache(state: &DocIdState) {
 }
 
 /// The form body of a GraphQL POST. Like gallery-dl's, minus its hard-coded
-/// `av`, `__hs`, `__rev` and `__hsi`: the build values are the page's own (when
-/// it has them), and `av` (the viewer's account id) is not sent.
+/// `av`, `__hs`, `__rev` and `__hsi`: these are the page's own values (when it
+/// has them; `av` is the viewer's `IG_USER_EIMU`, as instaloader reads it).
 fn form_body(
     op: &Operation,
     doc_id: &str,
@@ -315,6 +319,9 @@ fn form_body(
     request_number: u32,
 ) -> String {
     let mut form = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(av) = &tokens.av {
+        form.append_pair("av", av);
+    }
     form.append_pair("__d", "www")
         .append_pair("__user", "0")
         .append_pair("__a", "1")

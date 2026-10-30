@@ -43,6 +43,8 @@ pub struct Tokens {
     pub revision: Option<String>,
     /// `__hsi` of the page load.
     pub hsi: Option<String>,
+    /// `av`: the viewer's account id (`IG_USER_EIMU`).
+    pub av: Option<String>,
 }
 
 impl Tokens {
@@ -80,6 +82,7 @@ static PROFILE_ID_RES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 
+static AV_RE: LazyLock<Option<Regex>> = LazyLock::new(|| regex(r#""IG_USER_EIMU":"?(\d+)"#));
 static USERNAME_RE: LazyLock<Option<Regex>> =
     LazyLock::new(|| regex(r#""params":\{"username":"([A-Za-z0-9._]+)""#));
 
@@ -181,6 +184,11 @@ fn tokens(html: &str) -> Tokens {
         hsi: param("__hsi")
             .or_else(|| plain(extract(html, "\"hsi\":\"", "\"")))
             .filter(|hsi| hsi.bytes().all(|b| b.is_ascii_digit())),
+        av: AV_RE
+            .as_ref()
+            .and_then(|re| re.captures(html))
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string()),
     }
 }
 
@@ -205,9 +213,10 @@ fn bundles(html: &str, static_base: &str) -> Vec<String> {
     out
 }
 
-/// Whether an HTML body is Instagram's login page.
+/// Whether an HTML body is Instagram's login page (its login form; a mere
+/// link to `/accounts/login` appears on many pages).
 pub fn looks_like_login_page(body: &str) -> bool {
-    body.contains("/accounts/login") || body.contains("loginForm")
+    body.contains("loginForm")
 }
 
 #[cfg(test)]
