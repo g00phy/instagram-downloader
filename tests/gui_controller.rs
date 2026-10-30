@@ -1293,3 +1293,35 @@ async fn shutdown_stops_downloads_saves_and_releases_the_lock() {
     assert!(all_items_are(&queue, ItemStatus::Queued), "{queue:?}");
     ui.finish();
 }
+
+#[tokio::test]
+async fn cancel_grab_drops_a_stuck_link_and_later_grabs_still_work() {
+    let env = Env::new().await;
+    // A profile page that takes far longer than the test.
+    Mock::given(method("GET"))
+        .and(path("/slowpoke/"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(60)))
+        .mount(&env.server)
+        .await;
+    mount_carousel(&env).await;
+    let mut ui = env.start(Cookies::Valid);
+    startup(&mut ui);
+
+    ui.send(Command::Grab(env.request("@slowpoke")));
+    ui.wait_for("grabbing", |u| {
+        matches!(u, Update::Grabbing { pending_links: 1 })
+    });
+    // The worker is now waiting on the profile page.
+    std::thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    ui.send(Command::CancelGrab);
+    ui.wait_for("idle after cancel", |u| {
+        matches!(u, Update::Grabbing { pending_links: 0 })
+    });
+    ui.wait_log(LogLevel::Info, "grabbing cancelled");
+    assert!(started.elapsed() < Duration::from_secs(10));
+
+    let package = ui.grab_one(env.request(&post_url(SHORTCODE)));
+    assert_eq!(package.files.len(), 2);
+    ui.finish();
+}

@@ -736,3 +736,26 @@ fn closing_while_idle_does_not_ask() {
             .contains(&ViewportCommand::CancelClose)
     );
 }
+
+#[test]
+fn grabbing_shows_progress_and_can_be_cancelled() {
+    let mut window = Window::new();
+    window.click("🔗 LinkGrabber (0 staged)");
+    window.send(Update::Grabbing { pending_links: 1 });
+    window.send(Update::Log(LogLine {
+        at: 1_714_570_620,
+        level: LogLevel::Info,
+        text: "query id lookup: 40/120 scripts".to_string(),
+    }));
+    // The spinner repaints forever: step instead of waiting to settle.
+    window.harness.run_steps(4);
+    assert!(window.shows("Resolving 1 link(s)…"));
+    assert!(window.shows("query id lookup: 40/120 scripts"));
+    window.click_steps("✖ Cancel");
+    assert_eq!(window.sent(), vec![Command::CancelGrab]);
+
+    window.send(Update::Grabbing { pending_links: 0 });
+    window.run();
+    assert!(!window.shows("query id lookup: 40/120 scripts"));
+    assert!(!window.shows("✖ Cancel"));
+}

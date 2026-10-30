@@ -19,7 +19,7 @@ use igdl::instagram::{
 use igdl::links::{ProfileSection, Target, shortcode_to_media_id};
 use igdl::model::{Category, MediaKind};
 use serde_json::{Value, json};
-use wiremock::matchers::{body_string, header, method, path, query_param};
+use wiremock::matchers::{body_string, header, method, path, path_regex, query_param};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 /// A distinctive fake session id that must never show up in errors or logs.
@@ -3077,4 +3077,44 @@ fn client_and_futures_are_send_and_sync() {
     assert_send(&client.post_form("/api/v1/x/", &[]));
     assert_send(&client.current_user());
     assert_send(&client.user_by_username("x"));
+}
+
+#[tokio::test]
+async fn unreachable_scripts_end_the_doc_id_lookup_early() {
+    let server = MockServer::start().await;
+    let cdn = server.uri();
+    let bundles: Vec<String> = (1..=30).map(|n| format!("v4/x/B{n}.js")).collect();
+    let bundle_refs: Vec<&str> = bundles.iter().map(String::as_str).collect();
+    Mock::given(method("GET"))
+        .and(path("/alice/"))
+        .respond_with(html(profile_html_with(
+            &server,
+            "alice",
+            USER_ID,
+            None,
+            &bundle_refs,
+        )))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/rsrc.php/"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    mount_posts(
+        &server,
+        Value::Null,
+        vec![image_item(&cdn, 1, "C1", 10)],
+        None,
+    )
+    .await;
+    let resolved = run(&client(&server), &profile_target(None), &opts())
+        .await
+        .unwrap();
+    assert_eq!(keys(&resolved), vec!["1"], "the built-in doc id was used");
+    assert_eq!(
+        requests_to(&server, "/rsrc.php/").await.len(),
+        3,
+        "gave up after three failed scripts"
+    );
 }

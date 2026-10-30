@@ -17,6 +17,16 @@ use serde_json::Value;
 use crate::error::{Error, Result};
 use crate::instagram::client::{ApiRequest, CallOptions, Client, FEEDBACK_REQUIRED};
 use crate::instagram::doc_ids::{DocIdState, MAX_BUNDLES, OPERATIONS, Operation, extract_doc_ids};
+
+/// Doc id discovery gives up after this many script downloads fail in a row
+/// (a blocked or unreachable static host must not stall a grab for minutes).
+const DISCOVERY_MAX_FAILURES: usize = 3;
+
+/// Doc id discovery stops after this long and keeps what it found.
+const DISCOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How often discovery reports its progress (in scripts).
+const DISCOVERY_PROGRESS_EVERY: usize = 20;
 use crate::instagram::web::Tokens;
 use crate::redact;
 
@@ -202,19 +212,46 @@ impl Client {
                 return Ok(found);
             }
         };
-        for url in info.bundles.iter().take(MAX_BUNDLES) {
+        let bundles: Vec<&String> = info.bundles.iter().take(MAX_BUNDLES).collect();
+        if !bundles.is_empty() {
+            tracing::info!(
+                "looking up Instagram's current query ids in {} web-app scripts (about once a day)",
+                bundles.len()
+            );
+        }
+        let started = std::time::Instant::now();
+        let mut failures_in_a_row = 0;
+        for (number, url) in bundles.iter().enumerate() {
             match self.fetch_static(url).await {
                 Ok(script) => {
+                    failures_in_a_row = 0;
                     for (name, id) in extract_doc_ids(&script) {
                         found.entry(name).or_insert(id);
                     }
                 }
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(err) => {
+                    failures_in_a_row += 1;
                     tracing::debug!(bundle = %redact::redact_url(url), error = %err, "doc id discovery: skipping a bundle");
                 }
             }
             if OPERATIONS.iter().all(|op| found.contains_key(op.name)) {
                 break;
+            }
+            if failures_in_a_row >= DISCOVERY_MAX_FAILURES {
+                tracing::warn!(
+                    "cannot load Instagram's scripts (static.cdninstagram.com); using the built-in query ids"
+                );
+                break;
+            }
+            if started.elapsed() >= DISCOVERY_BUDGET {
+                tracing::info!(
+                    "the query id lookup is taking too long; using what it found and the built-in ids"
+                );
+                break;
+            }
+            if (number + 1) % DISCOVERY_PROGRESS_EVERY == 0 {
+                tracing::info!("query id lookup: {}/{} scripts", number + 1, bundles.len());
             }
         }
         if found.is_empty() {

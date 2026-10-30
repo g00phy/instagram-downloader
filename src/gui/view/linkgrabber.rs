@@ -461,8 +461,22 @@ impl GrabberView {
                 ui.add_space(12.0);
                 ui.add(egui::Spinner::new());
                 ui.label(format!("Resolving {} link(s)…", state.grabbing));
+                if ui
+                    .button("✖ Cancel")
+                    .on_hover_text("Stop resolving; nothing already staged is lost")
+                    .clicked()
+                {
+                    out.send(Command::CancelGrab);
+                }
             }
         });
+        if state.grabbing > 0
+            && let Some(status) = &state.grab_status
+        {
+            let shown: String = status.chars().take(160).collect();
+            ui.label(RichText::new(shown).weak())
+                .on_hover_text("Details are in the Log tab");
+        }
         if links > 0
             && let Some(problem) = &problem
         {

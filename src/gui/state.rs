@@ -169,6 +169,8 @@ pub struct ViewState {
     pub staged: Vec<StagedPackage>,
     /// Links still being resolved (0 = idle).
     pub grabbing: usize,
+    /// The latest progress line while links are being resolved.
+    pub grab_status: Option<String>,
     /// Whether downloads are running.
     pub downloading: bool,
     /// `None` until the controller reports it.
@@ -197,6 +199,7 @@ impl Default for ViewState {
             progress: HashMap::new(),
             staged: Vec::new(),
             grabbing: 0,
+            grab_status: None,
             downloading: false,
             account: None,
             settings: Settings::default(),
@@ -243,7 +246,12 @@ impl ViewState {
                 }
             },
             Update::Staged(staged) => self.staged = staged,
-            Update::Grabbing { pending_links } => self.grabbing = pending_links,
+            Update::Grabbing { pending_links } => {
+                self.grabbing = pending_links;
+                if pending_links == 0 {
+                    self.grab_status = None;
+                }
+            }
             Update::Downloading(running) => {
                 self.downloading = running;
                 if !running {
@@ -386,6 +394,9 @@ impl ViewState {
     pub fn push_log(&mut self, line: LogLine) {
         if line.level == LogLevel::Error {
             self.unseen_errors += 1;
+        }
+        if self.grabbing > 0 {
+            self.grab_status = Some(line.text.clone());
         }
         self.log.push_back(line);
         while self.log.len() > LOG_CAPACITY {

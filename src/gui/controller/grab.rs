@@ -85,6 +85,7 @@ async fn grab_links(
         let outcome = match links::parse_link(&link) {
             Err(err) => LinkOutcome::Failed(err),
             Ok(target) => {
+                tracing::info!("resolving {}", target.canonical_url());
                 let client = current_client(client);
                 let resolved = tokio::select! {
                     biased;
@@ -202,6 +203,27 @@ impl Controller {
         // The queue and archive stay where they were opened.
         options.data_dir = self.options.data_dir.clone();
         Ok(options)
+    }
+
+    /// `CancelGrab`: stops the worker (the link in progress and the queued
+    /// requests) and starts a fresh one for later grabs.
+    pub(super) fn cancel_grab(&mut self) {
+        if self.pending_links == 0 {
+            return;
+        }
+        self.grab_cancel.cancel();
+        self.grab_cancel = CancellationToken::new();
+        self.grab_jobs = spawn_worker(
+            Arc::clone(&self.client),
+            Arc::clone(&self.archive),
+            self.internal_tx.clone(),
+            self.grab_cancel.clone(),
+        );
+        let dropped = std::mem::take(&mut self.pending_links);
+        self.sink.info(format!(
+            "grabbing cancelled ({dropped} link(s) not resolved)"
+        ));
+        self.send_grabbing();
     }
 
     /// A message from the grab worker.

@@ -354,6 +354,7 @@ impl Controller {
             Command::Grab(request) => self.grab(request),
             Command::Accept { staged, start } => self.accept(&staged, start),
             Command::Discard { staged } => self.discard(&staged),
+            Command::CancelGrab => self.cancel_grab(),
             Command::Start => self.start_downloads(&[]),
             Command::Stop => self.stop_downloads(),
             Command::Retry(ids) => self.retry(&ids),

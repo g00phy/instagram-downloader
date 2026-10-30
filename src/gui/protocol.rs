@@ -41,6 +41,8 @@ pub enum Command {
     Accept { staged: Vec<u64>, start: bool },
     /// Drop staged packages (empty = all).
     Discard { staged: Vec<u64> },
+    /// Stop resolving: the link in progress and every queued grab are dropped.
+    CancelGrab,
     /// Download every queued item.
     Start,
     /// Stop running downloads; their items go back to queued (partial files are kept).

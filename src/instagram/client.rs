@@ -81,6 +81,9 @@ const WEB_FORM_DATA: &str = "/api/v1/accounts/edit/web_form_data/";
 const LOGIN_PROBE: &str =
     "/graphql/query?query_hash=d6f4427fbe92d846298cf93df0b937d3&variables=%7B%7D";
 
+/// Per-request timeout for the web app's static scripts (doc id discovery).
+const STATIC_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Longest server text (in characters) copied into an error message.
 const MAX_SERVER_TEXT: usize = 200;
 
@@ -903,6 +906,7 @@ impl Client {
         let request = self
             .static_http
             .request(Method::GET, url)
+            .timeout(self.config.timeout.min(STATIC_TIMEOUT))
             .headers(self.static_headers());
         let raw = self.send(Kind::Static, request, &label).await?;
         if raw.status.is_success() {
