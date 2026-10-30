@@ -538,10 +538,12 @@ async fn startup_sends_state_in_order_without_cookies() {
             settings,
             config_path,
             default_out_dir,
+            cookies_override,
         } => {
             assert_eq!(**settings, Settings::default());
             assert_eq!(config_path.as_deref(), Some(env.config_path().as_path()));
-            assert!(default_out_dir.is_absolute());
+            assert_gui_default_out_dir(default_out_dir);
+            assert_eq!(*cookies_override, None);
         }
         other => panic!("{other:?}"),
     }
@@ -568,7 +570,23 @@ async fn startup_with_cookies_reports_them_loaded() {
     let mut ui = env.start(Cookies::Valid);
     let updates = startup(&mut ui);
     assert!(matches!(updates[1], Update::Account(AccountStatus::Loaded)));
+    // The harness passes the cookie file like `--cookies` / `IGDL_COOKIES` does.
+    assert!(
+        matches!(&updates[0], Update::Settings { cookies_override: Some(path), .. } if *path == env.cookies()),
+        "{}",
+        describe(&updates[0])
+    );
     ui.finish();
+}
+
+/// The window's default download folder: `Downloads/Instagram` or
+/// `<home>/Instagram`, not the current directory (that of a double-clicked exe).
+fn assert_gui_default_out_dir(dir: &Path) {
+    assert!(dir.is_absolute(), "{}", dir.display());
+    if directories::UserDirs::new().is_some() {
+        assert!(dir.ends_with("Instagram"), "{}", dir.display());
+        assert_ne!(Some(dir), std::env::current_dir().ok().as_deref());
+    }
 }
 
 #[tokio::test]
@@ -1174,11 +1192,39 @@ async fn settings_without_a_config_path_apply_for_the_session() {
     };
     ui.send(Command::ApplySettings(Box::new(settings.clone())));
     ui.wait_log(LogLevel::Warn, "settings are used for this session only");
-    ui.wait_for(
+    let update = ui.wait_for(
         "new settings",
         |u| matches!(u, Update::Settings { settings: s, config_path: None, .. } if **s == settings),
     );
+    let Update::Settings {
+        default_out_dir, ..
+    } = update
+    else {
+        unreachable!()
+    };
+    assert_gui_default_out_dir(&default_out_dir);
     assert!(!env.config_path().exists());
+    ui.finish();
+}
+
+#[tokio::test]
+async fn grab_without_a_folder_uses_the_window_default() {
+    let env = Env::new().await;
+    mount_carousel(&env).await;
+    let mut ui = env.start(Cookies::Valid);
+    let updates = startup(&mut ui);
+    let Update::Settings {
+        default_out_dir, ..
+    } = &updates[0]
+    else {
+        unreachable!()
+    };
+    let request = GrabRequest {
+        out_dir: PathBuf::new(),
+        ..env.request(&post_url(SHORTCODE))
+    };
+    let package = ui.grab_one(request);
+    assert_eq!(&package.out_dir, default_out_dir);
     ui.finish();
 }
 

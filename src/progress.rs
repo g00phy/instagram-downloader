@@ -88,12 +88,7 @@ impl Progress {
     pub fn new(style: Style, files: usize) -> Self {
         let overall = (style == Style::Bars).then(|| {
             let bar = multi().add(ProgressBar::new(files as u64));
-            bar.set_style(
-                ProgressStyle::with_template(
-                    "{spinner:.green} [{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} files · {msg}",
-                )
-                .unwrap_or_else(|_| ProgressStyle::default_bar()),
-            );
+            bar.set_style(overall_style());
             bar.enable_steady_tick(Duration::from_millis(250));
             bar
         });
@@ -260,6 +255,23 @@ pub fn note(message: &str) {
     }
 }
 
+/// Spinner frames for fonts without braille glyphs (the Windows console's
+/// default fonts), last one shown when finished.
+const ASCII_TICKS: &str = "|/-\\ ";
+
+fn overall_style() -> ProgressStyle {
+    let style = ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] {bar:30.cyan/blue} {pos}/{len} files · {msg}",
+    )
+    .unwrap_or_else(|_| ProgressStyle::default_bar());
+    if cfg!(windows) {
+        // Cannot panic: `tick_chars` asserts at least two frames and there are five.
+        style.tick_chars(ASCII_TICKS)
+    } else {
+        style
+    }
+}
+
 fn file_style(known_length: bool) -> ProgressStyle {
     let template = if known_length {
         "  {wide_msg} {bytes:>10}/{total_bytes:<10} {bytes_per_sec:>11} {eta:>4}"
@@ -267,4 +279,17 @@ fn file_style(known_length: bool) -> ProgressStyle {
         "  {wide_msg} {bytes:>10} {bytes_per_sec:>11}"
     };
     ProgressStyle::with_template(template).unwrap_or_else(|_| ProgressStyle::default_bar())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ascii_spinner_frames_are_valid() {
+        assert!(ASCII_TICKS.is_ascii());
+        // `tick_chars` panics with fewer than two frames (one spinning + the final one).
+        let _ = ProgressStyle::default_spinner().tick_chars(ASCII_TICKS);
+        let _ = overall_style();
+    }
 }

@@ -233,7 +233,9 @@ async fn mount_profile(server: &MockServer, username: &str, id: &str, private: O
 
 /// A JS bundle defining relay operations (`name → doc id`).
 fn bundle_js(entries: &[(&str, &str)]) -> String {
-    let mut js = String::from("/*FB_PKG_DELIM*/\n__d(\"PolarisSomething\",[],(function(a,b,c,d,e,f){e.exports={}}),null);\n");
+    let mut js = String::from(
+        "/*FB_PKG_DELIM*/\n__d(\"PolarisSomething\",[],(function(a,b,c,d,e,f){e.exports={}}),null);\n",
+    );
     for (name, id) in entries {
         js.push_str(&format!(
             "__d(\"{name}_instagramRelayOperation\",[],(function(a,b,c,d,e,f){{e.exports=\"{id}\"}}),null);\n"
@@ -321,7 +323,10 @@ impl Match for Gql {
 }
 
 fn is_graphql(request: &Request, op: &doc_ids::Operation) -> bool {
-    form_of(request).get("fb_api_req_friendly_name").map(String::as_str) == Some(op.name)
+    form_of(request)
+        .get("fb_api_req_friendly_name")
+        .map(String::as_str)
+        == Some(op.name)
 }
 
 /// A GraphQL connection answer: `data.<root>.{edges[].node, page_info}`.
@@ -744,7 +749,11 @@ async fn missing_post_is_not_found() {
 
 #[tokio::test]
 async fn media_info_redirect_to_home_or_login_is_auth() {
-    for location in ["https://www.instagram.com/", "/", "/accounts/login/?next=/p/x/"] {
+    for location in [
+        "https://www.instagram.com/",
+        "/",
+        "/accounts/login/?next=/p/x/",
+    ] {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(media_info_path(POST_CODE)))
@@ -979,8 +988,20 @@ async fn profile_posts_without_limit_read_every_page() {
     let server = MockServer::start().await;
     let cdn = server.uri();
     mount_profile(&server, "alice", USER_ID, None).await;
-    mount_posts(&server, Value::Null, vec![image_item(&cdn, 1, "C1", 10)], Some("n1")).await;
-    mount_posts(&server, json!("n1"), vec![video_item(&cdn, 2, "C2", 9)], None).await;
+    mount_posts(
+        &server,
+        Value::Null,
+        vec![image_item(&cdn, 1, "C1", 10)],
+        Some("n1"),
+    )
+    .await;
+    mount_posts(
+        &server,
+        json!("n1"),
+        vec![video_item(&cdn, 2, "C2", 9)],
+        None,
+    )
+    .await;
     let resolved = run(
         &client(&server),
         &profile_target(Some(ProfileSection::Posts)),
@@ -1120,7 +1141,13 @@ async fn private_profile_followed_is_crawled() {
     let server = MockServer::start().await;
     let cdn = server.uri();
     mount_profile(&server, "alice", USER_ID, Some(true)).await;
-    mount_posts(&server, Value::Null, vec![image_item(&cdn, 7, "C7", 1)], None).await;
+    mount_posts(
+        &server,
+        Value::Null,
+        vec![image_item(&cdn, 7, "C7", 1)],
+        None,
+    )
+    .await;
     let resolved = run(&client(&server), &profile_target(None), &opts())
         .await
         .unwrap();
@@ -1253,11 +1280,22 @@ async fn reels_limit_stops_fetching_media_info() {
         limit: Some(2),
         ..opts()
     };
-    let resolved = run(&client(&server), &profile_target(Some(ProfileSection::Reels)), &options)
-        .await
-        .unwrap();
+    let resolved = run(
+        &client(&server),
+        &profile_target(Some(ProfileSection::Reels)),
+        &options,
+    )
+    .await
+    .unwrap();
     assert_eq!(keys(&resolved), vec!["301", "302"]);
-    assert!(resolved.notes.iter().any(|n| n.contains("reels: limited to 2")), "{:?}", resolved.notes);
+    assert!(
+        resolved
+            .notes
+            .iter()
+            .any(|n| n.contains("reels: limited to 2")),
+        "{:?}",
+        resolved.notes
+    );
 }
 
 #[tokio::test]
@@ -1284,7 +1322,10 @@ async fn tagged_posts_come_from_the_tagged_tab_then_media_info() {
     mount_media(&server, "Tag401", item).await;
     Mock::given(method("GET"))
         .and(path(media_info_path("Gone402")))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Media not found", "status": "fail"})))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_body_json(json!({"message": "Media not found", "status": "fail"})),
+        )
         .mount(&server)
         .await;
     let resolved = run(
@@ -1300,7 +1341,10 @@ async fn tagged_posts_come_from_the_tagged_tab_then_media_info() {
     assert_eq!(resolved.files[0].owner, "carol");
     assert_eq!(resolved.files[0].owner_id.as_deref(), Some("2002"));
     assert!(
-        resolved.notes.iter().any(|n| n.contains("1 post(s) that are no longer available")),
+        resolved
+            .notes
+            .iter()
+            .any(|n| n.contains("1 post(s) that are no longer available")),
         "{:?}",
         resolved.notes
     );
@@ -1440,7 +1484,11 @@ async fn stories_fall_back_to_graphql_when_reels_media_fails() {
             .and(gql(&doc_ids::STORIES).after(Value::Null))
             .respond_with(ok(connection(
                 STORIES_ROOT,
-                vec![story_reel(USER_ID, "alice", vec![image_item(&cdn, 611, "S1", 5)])],
+                vec![story_reel(
+                    USER_ID,
+                    "alice",
+                    vec![image_item(&cdn, 611, "S1", 5)],
+                )],
                 Some("more"),
             )))
             .expect(1)
@@ -1718,7 +1766,10 @@ async fn highlight_link_falls_back_to_graphql_with_home_page_tokens() {
     assert_eq!(keys(&resolved), vec!["9055"]);
     let gql_request = &requests_to(&server, "/graphql/query").await[0];
     assert_eq!(header_of(gql_request, "x-fb-lsd"), LSD);
-    assert_eq!(header_of(gql_request, "referer"), format!("{}/", server.uri()));
+    assert_eq!(
+        header_of(gql_request, "referer"),
+        format!("{}/", server.uri())
+    );
     assert_eq!(
         variables_of(gql_request)["reel_ids"],
         json!(["highlight:55"])
@@ -1808,13 +1859,29 @@ async fn stale_doc_id_cache_is_rediscovered() {
     let server = MockServer::start().await;
     let cdn = server.uri();
     let cache_dir = tempfile::tempdir().unwrap();
-    write_cache(cache_dir.path(), doc_ids::POSTS.name, "1110001", now() - 2 * 86_400);
+    write_cache(
+        cache_dir.path(),
+        doc_ids::POSTS.name,
+        "1110001",
+        now() - 2 * 86_400,
+    );
     Mock::given(method("GET"))
         .and(path("/alice/"))
-        .respond_with(html(profile_html_with(&server, "alice", USER_ID, None, &["v4/a/Posts.js"])))
+        .respond_with(html(profile_html_with(
+            &server,
+            "alice",
+            USER_ID,
+            None,
+            &["v4/a/Posts.js"],
+        )))
         .mount(&server)
         .await;
-    mount_bundle(&server, "v4/a/Posts.js", &[(doc_ids::POSTS.name, "2220001")]).await;
+    mount_bundle(
+        &server,
+        "v4/a/Posts.js",
+        &[(doc_ids::POSTS.name, "2220001")],
+    )
+    .await;
     Mock::given(method("POST"))
         .and(path("/graphql/query"))
         .and(gql(&doc_ids::POSTS).doc("2220001"))
@@ -1843,10 +1910,21 @@ async fn config_doc_ids_win_over_discovery() {
     let cdn = server.uri();
     Mock::given(method("GET"))
         .and(path("/alice/"))
-        .respond_with(html(profile_html_with(&server, "alice", USER_ID, None, &["v4/a/Posts.js"])))
+        .respond_with(html(profile_html_with(
+            &server,
+            "alice",
+            USER_ID,
+            None,
+            &["v4/a/Posts.js"],
+        )))
         .mount(&server)
         .await;
-    mount_bundle(&server, "v4/a/Posts.js", &[(doc_ids::POSTS.name, "2220001")]).await;
+    mount_bundle(
+        &server,
+        "v4/a/Posts.js",
+        &[(doc_ids::POSTS.name, "2220001")],
+    )
+    .await;
     Mock::given(method("POST"))
         .and(path("/graphql/query"))
         .and(gql(&doc_ids::POSTS).doc("5550001"))
@@ -1872,7 +1950,9 @@ async fn config_doc_ids_win_over_discovery() {
     mount_profile(&server, "alice", USER_ID, None).await;
     Mock::given(method("POST"))
         .and(path("/graphql/query"))
-        .respond_with(ok(json!({"data": null, "errors": [{"message": "PersistedQueryNotFound"}]})))
+        .respond_with(ok(
+            json!({"data": null, "errors": [{"message": "PersistedQueryNotFound"}]}),
+        ))
         .expect(1)
         .mount(&server)
         .await;
@@ -1884,7 +1964,9 @@ async fn config_doc_ids_win_over_discovery() {
         Some(jar()),
     )
     .unwrap();
-    let err = run(&client, &profile_target(None), &opts()).await.unwrap_err();
+    let err = run(&client, &profile_target(None), &opts())
+        .await
+        .unwrap_err();
     assert!(
         matches!(&err, Error::Parse(m) if m.contains("is outdated") && m.contains("[doc_ids]") && m.contains("5550001")),
         "{err:?}"
@@ -1897,13 +1979,29 @@ async fn outdated_query_triggers_one_rediscovery() {
     let cdn = server.uri();
     let cache_dir = tempfile::tempdir().unwrap();
     // Yesterday's discovery (still fresh) found 1110001; Instagram moved on.
-    write_cache(cache_dir.path(), doc_ids::POSTS.name, "1110001", now() - 3600);
+    write_cache(
+        cache_dir.path(),
+        doc_ids::POSTS.name,
+        "1110001",
+        now() - 3600,
+    );
     Mock::given(method("GET"))
         .and(path("/alice/"))
-        .respond_with(html(profile_html_with(&server, "alice", USER_ID, None, &["v4/a/Posts.js"])))
+        .respond_with(html(profile_html_with(
+            &server,
+            "alice",
+            USER_ID,
+            None,
+            &["v4/a/Posts.js"],
+        )))
         .mount(&server)
         .await;
-    mount_bundle(&server, "v4/a/Posts.js", &[(doc_ids::POSTS.name, "2220001")]).await;
+    mount_bundle(
+        &server,
+        "v4/a/Posts.js",
+        &[(doc_ids::POSTS.name, "2220001")],
+    )
+    .await;
     Mock::given(method("POST"))
         .and(path("/graphql/query"))
         .and(gql(&doc_ids::POSTS).doc("1110001"))
@@ -1945,10 +2043,21 @@ async fn outdated_query_without_a_newer_id_is_a_parse_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/alice/"))
-        .respond_with(html(profile_html_with(&server, "alice", USER_ID, None, &["v4/a/Posts.js"])))
+        .respond_with(html(profile_html_with(
+            &server,
+            "alice",
+            USER_ID,
+            None,
+            &["v4/a/Posts.js"],
+        )))
         .mount(&server)
         .await;
-    mount_bundle(&server, "v4/a/Posts.js", &[(doc_ids::POSTS.name, "1110001")]).await;
+    mount_bundle(
+        &server,
+        "v4/a/Posts.js",
+        &[(doc_ids::POSTS.name, "1110001")],
+    )
+    .await;
     // Discovery finds 1110001; it fails, the built-in default is tried once, and fails too.
     Mock::given(method("POST"))
         .and(path("/graphql/query"))
@@ -1957,7 +2066,9 @@ async fn outdated_query_without_a_newer_id_is_a_parse_error() {
         .mount(&server)
         .await;
     let client = client(&server);
-    let err = run(&client, &profile_target(None), &opts()).await.unwrap_err();
+    let err = run(&client, &profile_target(None), &opts())
+        .await
+        .unwrap_err();
     assert!(
         matches!(&err, Error::Parse(m) if m.starts_with(&format!("Instagram query {} is outdated: execution error", doc_ids::POSTS.name))),
         "{err:?}"
@@ -1967,7 +2078,13 @@ async fn outdated_query_without_a_newer_id_is_a_parse_error() {
         .iter()
         .map(|r| form_of(r)["doc_id"].clone())
         .collect();
-    assert_eq!(ids, vec!["1110001".to_string(), doc_ids::POSTS.default_doc_id.to_string()]);
+    assert_eq!(
+        ids,
+        vec![
+            "1110001".to_string(),
+            doc_ids::POSTS.default_doc_id.to_string()
+        ]
+    );
     assert_eq!(requests_to(&server, "/rsrc.php/").await.len(), 1);
 
     // With other sections, an outdated one is skipped with a note.
@@ -1975,7 +2092,9 @@ async fn outdated_query_without_a_newer_id_is_a_parse_error() {
     mount_profile(&server, "alice", USER_ID, None).await;
     Mock::given(method("POST"))
         .and(path("/graphql/query"))
-        .respond_with(ok(json!({"data": null, "errors": [{"message": "Query error"}]})))
+        .respond_with(ok(
+            json!({"data": null, "errors": [{"message": "Query error"}]}),
+        ))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -1987,9 +2106,14 @@ async fn outdated_query_without_a_newer_id_is_a_parse_error() {
         sections: vec![ProfileSection::Posts, ProfileSection::Stories],
         ..opts()
     };
-    let resolved = run(&client_for(&server), &profile_target(None), &options).await.unwrap();
+    let resolved = run(&client_for(&server), &profile_target(None), &options)
+        .await
+        .unwrap();
     assert!(
-        resolved.notes.iter().any(|n| n.starts_with("posts: skipped") && n.contains("outdated")),
+        resolved
+            .notes
+            .iter()
+            .any(|n| n.starts_with("posts: skipped") && n.contains("outdated")),
         "{:?}",
         resolved.notes
     );
@@ -2127,7 +2251,10 @@ async fn a_429_pauses_every_request_then_retries_once() {
         tokio::spawn(async move { client.get_json("/api/v1/a/").await })
     };
     while client.paused_for().is_none() {
-        assert!(started.elapsed() < Duration::from_secs(5), "no pause started");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "no pause started"
+        );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     // Another request (a page, even) waits for the pause too.
@@ -2172,7 +2299,9 @@ async fn please_wait_and_feedback_required_are_not_retried() {
             "re-export cookies or wait",
         ),
         (
-            ok(json!({"message": "Please wait a few minutes before you try again.", "status": "fail"})),
+            ok(
+                json!({"message": "Please wait a few minutes before you try again.", "status": "fail"}),
+            ),
             "re-export cookies or wait",
         ),
         (
@@ -2334,7 +2463,10 @@ async fn login_check_reads_only_the_username_of_the_account_form() {
     mount_probe(&server, probe_user("unused"), 0).await;
     let logs = capture_logs();
     let me = client(&server).current_user().await.unwrap();
-    assert_eq!((me.id.as_str(), me.username.as_str()), (VIEWER_ID, "viewer"));
+    assert_eq!(
+        (me.id.as_str(), me.username.as_str()),
+        (VIEWER_ID, "viewer")
+    );
     assert_eq!(me.full_name, None, "nothing else of the form is kept");
     let shown = format!("{me:?}");
     assert_no_secrets(&shown);
@@ -2350,8 +2482,11 @@ async fn login_check_falls_back_to_the_probe_without_waiting() {
         ResponseTemplate::new(429),
         ResponseTemplate::new(500).set_body_string("oops"),
         ResponseTemplate::new(302).insert_header("location", "https://www.instagram.com/"),
-        ResponseTemplate::new(401).set_body_json(json!({"message": "Please wait a few minutes before you try again.", "status": "fail"})),
-        ResponseTemplate::new(403).set_body_json(json!({"message": "useragent mismatch", "status": "fail"})),
+        ResponseTemplate::new(401).set_body_json(
+            json!({"message": "Please wait a few minutes before you try again.", "status": "fail"}),
+        ),
+        ResponseTemplate::new(403)
+            .set_body_json(json!({"message": "useragent mismatch", "status": "fail"})),
         ok(json!({"form_data": {"email": EMAIL}, "status": "ok"})),
     ];
     for failure in failures {
@@ -2361,7 +2496,10 @@ async fn login_check_falls_back_to_the_probe_without_waiting() {
         let client = Client::new(slow_pause_config(&server), Some(jar())).unwrap();
         let started = Instant::now();
         let me = client.current_user().await.unwrap();
-        assert_eq!((me.id.as_str(), me.username.as_str()), (VIEWER_ID, "viewer"));
+        assert_eq!(
+            (me.id.as_str(), me.username.as_str()),
+            (VIEWER_ID, "viewer")
+        );
         assert!(started.elapsed() < Duration::from_secs(5), "no waiting");
     }
 }
@@ -2400,9 +2538,17 @@ async fn login_check_ends_at_an_authentication_signal() {
     // The probe's `data.user == null` means the session is not logged in.
     let server = MockServer::start().await;
     mount_form(&server, ResponseTemplate::new(429), 1).await;
-    mount_probe(&server, ok(json!({"data": {"user": null}, "status": "ok"})), 1).await;
+    mount_probe(
+        &server,
+        ok(json!({"data": {"user": null}, "status": "ok"})),
+        1,
+    )
+    .await;
     let err = client(&server).current_user().await.unwrap_err();
-    assert!(matches!(&err, Error::Auth(m) if m.contains("not logged in")), "{err:?}");
+    assert!(
+        matches!(&err, Error::Auth(m) if m.contains("not logged in")),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
@@ -2431,7 +2577,8 @@ async fn login_check_that_cannot_tell_says_the_cookies_are_probably_fine() {
     let server = MockServer::start().await;
     mount_form(
         &server,
-        ResponseTemplate::new(400).set_body_json(json!({"message": "feedback_required", "status": "fail"})),
+        ResponseTemplate::new(400)
+            .set_body_json(json!({"message": "feedback_required", "status": "fail"})),
         1,
     )
     .await;
@@ -2475,7 +2622,10 @@ async fn login_check_without_ds_user_id_or_session() {
     .await;
     let no_ds = Client::new(
         config(&server),
-        Some(CookieJar::from_pairs([("sessionid", SESSION), ("csrftoken", CSRF)])),
+        Some(CookieJar::from_pairs([
+            ("sessionid", SESSION),
+            ("csrftoken", CSRF),
+        ])),
     )
     .unwrap();
     let me = no_ds.current_user().await.unwrap();
@@ -2483,7 +2633,10 @@ async fn login_check_without_ds_user_id_or_session() {
 
     let anonymous = Client::new(config(&server), None).unwrap();
     assert!(!anonymous.is_authenticated());
-    assert!(matches!(anonymous.current_user().await, Err(Error::Auth(_))));
+    assert!(matches!(
+        anonymous.current_user().await,
+        Err(Error::Auth(_))
+    ));
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
@@ -2608,11 +2761,28 @@ async fn graphql_crawl_and_login_check_logs_hold_no_secrets() {
     let cdn = server.uri();
     Mock::given(method("GET"))
         .and(path("/alice/"))
-        .respond_with(html(profile_html_with(&server, "alice", USER_ID, None, &["v4/a/Posts.js"])))
+        .respond_with(html(profile_html_with(
+            &server,
+            "alice",
+            USER_ID,
+            None,
+            &["v4/a/Posts.js"],
+        )))
         .mount(&server)
         .await;
-    mount_bundle(&server, "v4/a/Posts.js", &[(doc_ids::POSTS.name, "1110001")]).await;
-    mount_posts(&server, Value::Null, vec![image_item(&cdn, 1, "C1", 10)], Some("c2")).await;
+    mount_bundle(
+        &server,
+        "v4/a/Posts.js",
+        &[(doc_ids::POSTS.name, "1110001")],
+    )
+    .await;
+    mount_posts(
+        &server,
+        Value::Null,
+        vec![image_item(&cdn, 1, "C1", 10)],
+        Some("c2"),
+    )
+    .await;
     Mock::given(method("POST"))
         .and(path("/graphql/query"))
         .and(gql(&doc_ids::POSTS).after(json!("c2")))
@@ -2624,13 +2794,18 @@ async fn graphql_crawl_and_login_check_logs_hold_no_secrets() {
     mount_probe(&server, ResponseTemplate::new(429), 1).await;
     let logs = capture_logs();
     let client = client(&server);
-    let err = run(&client, &profile_target(None), &opts()).await.unwrap_err();
+    let err = run(&client, &profile_target(None), &opts())
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::RateLimited(_)), "{err:?}");
     let err = client.current_user().await.unwrap_err();
     let shown = format!("{err} {err:?}");
     assert_no_secrets(&shown);
     let text = logs.text();
-    assert!(text.contains("GraphQL request"), "debug logs were captured: {text}");
+    assert!(
+        text.contains("GraphQL request"),
+        "debug logs were captured: {text}"
+    );
     assert_no_secrets(&text);
     assert!(!text.contains(LSD), "{text}");
 }

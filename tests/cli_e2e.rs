@@ -545,7 +545,11 @@ async fn cookies_check_reports_names_only() {
 
     let online = env.igdl_auth(&["cookies", "check", "--online"]).await;
     assert_eq!(online.code, 0, "{}", online.debug());
-    assert!(online.stdout.contains("@me_myself (id 999)"), "{}", online.debug());
+    assert!(
+        online.stdout.contains("@me_myself (id 999)"),
+        "{}",
+        online.debug()
+    );
     online.assert_no_secrets();
     for private in ["me@example.invalid", "+1 555 0100", "1990-01-01"] {
         assert!(

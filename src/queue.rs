@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::fsutil;
 use crate::model::{Item, ItemStatus, MediaFile, Package};
 
 /// Current `queue.json` format version.
@@ -365,7 +366,7 @@ impl QueueStore {
             let _ = std::fs::remove_file(&tmp);
             return Err(Error::io(format!("cannot write {}", tmp.display()), err));
         }
-        if let Err(err) = std::fs::rename(&tmp, &path) {
+        if let Err(err) = fsutil::rename_with_retry(&tmp, &path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(Error::io(format!("cannot replace {}", path.display()), err));
         }

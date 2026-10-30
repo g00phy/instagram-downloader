@@ -182,6 +182,8 @@ pub struct ViewState {
     pub config_path: Option<PathBuf>,
     /// Download root used when the settings name none.
     pub default_out_dir: PathBuf,
+    /// Cookie file from `--cookies` / `IGDL_COOKIES`, used instead of the settings' one.
+    pub cookies_override: Option<PathBuf>,
     log: VecDeque<LogLine>,
     unseen_errors: usize,
     /// Why the controller cannot work, if it cannot.
@@ -201,6 +203,7 @@ impl Default for ViewState {
             settings_generation: 0,
             config_path: None,
             default_out_dir: PathBuf::new(),
+            cookies_override: None,
             log: VecDeque::new(),
             unseen_errors: 0,
             fatal: None,
@@ -216,10 +219,12 @@ impl ViewState {
                 settings,
                 config_path,
                 default_out_dir,
+                cookies_override,
             } => {
                 self.settings = *settings;
                 self.config_path = config_path;
                 self.default_out_dir = default_out_dir;
+                self.cookies_override = cookies_override;
                 self.settings_generation += 1;
             }
             Update::Queue(queue) => {
@@ -561,12 +566,17 @@ mod tests {
                 settings: Box::new(settings.clone()),
                 config_path: Some(PathBuf::from("/cfg/config.toml")),
                 default_out_dir: PathBuf::from("/home/me"),
+                cookies_override: Some(PathBuf::from("/env/cookies.txt")),
             },
             now,
         );
         assert_eq!(state.settings, settings);
         assert_eq!(state.settings_generation, 1);
         assert_eq!(state.default_out_dir, PathBuf::from("/home/me"));
+        assert_eq!(
+            state.cookies_override,
+            Some(PathBuf::from("/env/cookies.txt"))
+        );
 
         let q = queue(vec![
             item(2, ItemStatus::Done, 10, Some(10)),

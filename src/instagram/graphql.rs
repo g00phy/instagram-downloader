@@ -178,11 +178,7 @@ impl Client {
 
     /// Scans the JS bundles referenced by `page` for doc ids (without cookies)
     /// and records what it finds. Failures are logged, never returned.
-    async fn discover(
-        &self,
-        page: &str,
-        state: &mut DocIdState,
-    ) -> BTreeMap<&'static str, String> {
+    async fn discover(&self, page: &str, state: &mut DocIdState) -> BTreeMap<&'static str, String> {
         state.scanned_pages.insert(page.to_string());
         let mut found: BTreeMap<&'static str, String> = BTreeMap::new();
         let info = match self.page_info(page, false).await {
@@ -316,7 +312,8 @@ fn form_body(
     if let Some(hs) = &tokens.haste_session {
         form.append_pair("__hs", hs);
     }
-    form.append_pair("dpr", "1").append_pair("__ccg", "EXCELLENT");
+    form.append_pair("dpr", "1")
+        .append_pair("__ccg", "EXCELLENT");
     if let Some(rev) = &tokens.revision {
         form.append_pair("__rev", rev);
     }
@@ -399,9 +396,15 @@ fn error_text(json: &Value) -> Option<String> {
 /// Whether an error text says the viewer may not see the data.
 fn is_permission_problem(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    ["not authorized", "not_authorized", "permission", "private", "not allowed"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    [
+        "not authorized",
+        "not_authorized",
+        "permission",
+        "private",
+        "not allowed",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// The usable result of a GraphQL answer, or why there is none.
@@ -415,7 +418,11 @@ fn interpret(json: &Value, op: &Operation) -> std::result::Result<Value, Problem
     match result {
         Some(value) if value.is_object() => {
             if let Some(errors) = &errors {
-                tracing::debug!(query = op.name, "GraphQL answer with partial errors: {}", redact::redact(errors));
+                tracing::debug!(
+                    query = op.name,
+                    "GraphQL answer with partial errors: {}",
+                    redact::redact(errors)
+                );
             }
             Ok(value.clone())
         }
@@ -507,7 +514,10 @@ mod tests {
         assert!(!pairs.contains_key("av"));
         assert!(!pairs.contains_key("__hsi"));
         let bare = form_body(&POSTS, "1", "{}", &Tokens::default(), 0);
-        assert!(!bare.contains("lsd=") && !bare.contains("fb_dtsg="), "{bare}");
+        assert!(
+            !bare.contains("lsd=") && !bare.contains("fb_dtsg="),
+            "{bare}"
+        );
     }
 
     #[test]
@@ -532,9 +542,14 @@ mod tests {
             Err(Problem::Outdated("execution error".into()))
         );
         let missing = json!({"data": {"other": {}}});
-        assert!(matches!(interpret(&missing, &POSTS), Err(Problem::Outdated(t)) if t.contains("has no")));
+        assert!(
+            matches!(interpret(&missing, &POSTS), Err(Problem::Outdated(t)) if t.contains("has no"))
+        );
         let private = json!({"data": {POSTS.root_field.unwrap(): null}, "errors": [{"message": "Not authorized to view user"}]});
-        assert!(matches!(interpret(&private, &POSTS), Err(Problem::Permission(_))));
+        assert!(matches!(
+            interpret(&private, &POSTS),
+            Err(Problem::Permission(_))
+        ));
         let null = json!({"data": {POSTS.root_field.unwrap(): null}});
         assert_eq!(interpret(&null, &POSTS), Ok(Value::Null));
         let partial = json!({"data": {POSTS.root_field.unwrap(): {"edges": []}}, "errors": [{"message": "x"}]});

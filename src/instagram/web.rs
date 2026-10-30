@@ -155,7 +155,11 @@ fn tokens(html: &str) -> Tokens {
     // build identifiers the web app sends with every request.
     let query: Vec<(String, String)> = string_value(eqmc, "u")
         .and_then(|u| u.split_once('?').map(|(_, q)| q.to_string()))
-        .map(|q| url::form_urlencoded::parse(q.as_bytes()).into_owned().collect())
+        .map(|q| {
+            url::form_urlencoded::parse(q.as_bytes())
+                .into_owned()
+                .collect()
+        })
         .unwrap_or_default();
     let param = |name: &str| {
         query
@@ -248,7 +252,10 @@ mod tests {
             ]
         );
         let debug = format!("{:?}", info.tokens);
-        assert!(!debug.contains("DTSG-TOKEN") && !debug.contains("LSD-TOKEN"), "{debug}");
+        assert!(
+            !debug.contains("DTSG-TOKEN") && !debug.contains("LSD-TOKEN"),
+            "{debug}"
+        );
     }
 
     #[test]
@@ -259,7 +266,10 @@ mod tests {
         assert_eq!(info.tokens.lsd.as_deref(), Some("lsd2"));
         assert_eq!(info.tokens.fb_dtsg.as_deref(), Some("dt2"));
         assert_eq!(info.is_private, Some(true));
-        assert_eq!(info.followed_by_viewer, None, "disagreeing values are unknown");
+        assert_eq!(
+            info.followed_by_viewer, None,
+            "disagreeing values are unknown"
+        );
 
         let xig = r#"{"xig_user_by_username":{"username":"bob","pk":"4242","is_private":false}}"#;
         assert_eq!(parse_page(xig, STATIC).profile_id.as_deref(), Some("4242"));

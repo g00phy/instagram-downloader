@@ -104,7 +104,11 @@ window). Set your cookie file once under **⚙ Settings**, then:
 ![igdl-gui LinkGrabber](docs/gui-linkgrabber.png)
 
 The account chip (top right) verifies the cookies with Instagram (`@you` in green when
-logged in). Settings are saved to the same `config.toml` the command line reads.
+logged in; amber "Login not verified" when Instagram is only throttling the check,
+which does not mean the cookies are bad). Downloads go to `Downloads\Instagram`
+unless you choose another default folder. Settings are saved to the same
+`config.toml` the command line reads. Double-clicking `igdl.exe` (the command-line
+tool) just shows its help; use `igdl-gui.exe` for the window.
 Closing the window while downloads run asks first; partial files are kept either way.
 While the window is open it owns the download list: `igdl list` still works, but
 commands that change the list (`grab`, `start`, …) report that another igdl is using it.
@@ -173,7 +177,7 @@ stdin (`-i -`).
 | Option | Default | |
 |---|---|---|
 | `--cookies FILE` | `IGDL_COOKIES` / config | cookie export to authenticate with |
-| `-o, --out DIR` | current directory | download root (stored per package) |
+| `-o, --out DIR` | current directory (window: `Downloads\Instagram`) | download root (stored per package) |
 | `-j, --jobs N` | `4` | parallel downloads |
 | `--include LIST` | `posts` | profile sections: `posts,reels,tagged,stories,highlights` |
 | `--limit N` | none | max posts per profile section (for highlights: max highlight reels) |
@@ -218,6 +222,7 @@ trailing dots/spaces, length). Templates cannot escape the output directory.
 | `queue.json` | data dir (`%APPDATA%\igdl\data`, `~/.local/share/igdl`) | the download list; locked while `igdl` runs |
 | `archive.txt` | data dir | one media id per line for every finished file |
 | `*.part` | next to the final file | partial download, resumed on the next run |
+| `igdl-gui-crash.log` | data dir (or the temp folder) | written if the window crashes; attach it to bug reports |
 
 ```toml
 # config.toml
@@ -268,7 +273,9 @@ cargo test
 
 Tests never touch the network: the Instagram API and CDN are mocked with a local
 HTTP server (`IGDL_API_BASE` points the client at it). `IGDL_LOG` takes a
-`tracing` filter (e.g. `IGDL_LOG=igdl=debug`) for troubleshooting. See [AGENTS.md](AGENTS.md)
+`tracing` filter (e.g. `IGDL_LOG=igdl=debug`) for troubleshooting.
+`IGDL_RENDERER=glow|wgpu` forces the window's renderer (it normally tries OpenGL
+first and falls back to Direct3D 12/Vulkan, e.g. over Remote Desktop). See [AGENTS.md](AGENTS.md)
 for the architecture and contributor/agent guidelines.
 
 ## Legal

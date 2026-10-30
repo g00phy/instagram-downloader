@@ -10,6 +10,7 @@ use eframe::egui::{
     Ui,
 };
 
+use super::settings::{clean_path, dialog_folder};
 use super::style::Palette;
 use super::{Outbox, Tab};
 use crate::config::parse_date;
@@ -137,7 +138,7 @@ impl GrabForm {
         if let Some(error) = self.template_error() {
             return Some(format!("Template: {error}"));
         }
-        if self.out_dir.trim().is_empty() {
+        if clean_path(&self.out_dir).is_empty() {
             return Some("Choose a folder to save to".into());
         }
         None
@@ -159,7 +160,7 @@ impl GrabForm {
             since: self.since.trim().to_string(),
             until: self.until.trim().to_string(),
             update: self.update,
-            out_dir: PathBuf::from(self.out_dir.trim()),
+            out_dir: PathBuf::from(clean_path(&self.out_dir)),
             template: self.template.trim().to_string(),
         })
     }
@@ -382,8 +383,8 @@ impl GrabberView {
             }
             if ui.button("Browse…").clicked() {
                 let mut dialog = rfd::FileDialog::new().set_title("Save downloads to");
-                if !form.out_dir.trim().is_empty() {
-                    dialog = dialog.set_directory(form.out_dir.trim());
+                if let Some(dir) = dialog_folder(&form.out_dir) {
+                    dialog = dialog.set_directory(dir);
                 }
                 if let Some(dir) = dialog.pick_folder() {
                     form.out_dir = dir.display().to_string();
@@ -482,19 +483,16 @@ impl GrabberView {
         else {
             return;
         };
-        match std::fs::read_to_string(&path) {
+        // UTF-8 (with or without BOM) and UTF-16, as Windows PowerShell 5.1 writes it.
+        match crate::fsutil::read_text(&path) {
             Ok(contents) => {
                 let text = &mut self.form.text;
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
                 }
-                // Windows editors may start the file with a byte order mark.
-                text.push_str(contents.trim_start_matches('\u{feff}'));
+                text.push_str(&contents);
             }
-            Err(err) => out.notice(
-                LogLevel::Warn,
-                format!("Cannot read {}: {err}", path.display()),
-            ),
+            Err(err) => out.notice(LogLevel::Warn, format!("Cannot load the links file: {err}")),
         }
     }
 
@@ -756,6 +754,16 @@ mod tests {
         form.sections = [true; 5];
         form.out_dir = " ".into();
         assert!(form.options_error().is_some());
+        form.out_dir = " \"\" ".into();
+        assert_eq!(form.options_error().unwrap(), "Choose a folder to save to");
+    }
+
+    #[test]
+    fn quoted_folders_are_unquoted() {
+        let mut form = form();
+        form.out_dir = " \"D:\\My Insta\" ".into();
+        let request = form.request("@example_user".into()).unwrap();
+        assert_eq!(request.out_dir, PathBuf::from(r"D:\My Insta"));
     }
 
     #[test]

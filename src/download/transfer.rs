@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use super::files::{existing_len, free_path, part_path, remove_if_exists};
 use super::{Event, Inner, Job, Outcome, UrlRefresher};
 use crate::error::Error;
+use crate::fsutil;
 use crate::model::ItemError;
 
 /// Minimum time between two `Progress` events of one file.
@@ -411,12 +412,14 @@ async fn finish(part: &Path, dest: &Path, bytes: u64) -> Result<PathBuf, Error> 
         },
         Err(err) => return Err(Error::io(format!("cannot check {}", dest.display()), err)),
     };
-    tokio::fs::rename(part, &target).await.map_err(|err| {
-        Error::io(
-            format!("cannot move {} to {}", part.display(), target.display()),
-            err,
-        )
-    })?;
+    fsutil::rename_with_retry_async(part, &target)
+        .await
+        .map_err(|err| {
+            Error::io(
+                format!("cannot move {} to {}", part.display(), target.display()),
+                err,
+            )
+        })?;
     tracing::debug!(path = %target.display(), bytes, "download finished");
     Ok(target)
 }
