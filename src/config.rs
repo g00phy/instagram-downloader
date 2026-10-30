@@ -1,14 +1,17 @@
 //! `config.toml` settings, default directories and value parsers shared by the CLI.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::NaiveDate;
 use directories::ProjectDirs;
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::instagram::doc_ids;
 use crate::links::ProfileSection;
 
 /// Environment variable overriding the data directory.
@@ -30,7 +33,7 @@ pub struct Settings {
     pub jobs: Option<usize>,
     pub template: Option<String>,
     pub retries: Option<u32>,
-    /// Seconds between API requests.
+    /// Seconds between API requests (a random 0–100 % is added).
     pub api_delay: Option<f64>,
     /// e.g. `"2M"`; see [`parse_rate`].
     pub limit_rate: Option<String>,
@@ -39,12 +42,48 @@ pub struct Settings {
     pub include: Option<Vec<String>>,
     /// Set file modification times to the post date (default true).
     pub set_mtime: Option<bool>,
+    /// `[doc_ids]`: GraphQL operation name → doc id, overriding the built-in
+    /// and discovered ids (ids may be written as strings or integers).
+    #[serde(
+        default,
+        deserialize_with = "de_doc_ids",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub doc_ids: Option<BTreeMap<String, String>>,
+}
+
+/// A doc id written as a TOML string or integer.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DocIdValue {
+    Text(String),
+    Number(i64),
+}
+
+/// `[doc_ids]` with string or integer values, stored as strings.
+fn de_doc_ids<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<BTreeMap<String, String>>, D::Error> {
+    let table = Option::<BTreeMap<String, DocIdValue>>::deserialize(deserializer)?;
+    Ok(table.map(|table| {
+        table
+            .into_iter()
+            .map(|(name, value)| {
+                let id = match value {
+                    DocIdValue::Text(text) => text.trim().to_string(),
+                    DocIdValue::Number(number) => number.to_string(),
+                };
+                (name, id)
+            })
+            .collect()
+    }))
 }
 
 impl Settings {
     /// Checks the values that are set: `jobs` in `1..=32`, `api_delay` finite and
-    /// ≥ 0, `retries` ≤ 100, a non-empty `template`, a valid `limit_rate` and
-    /// known `include` sections. The error names the offending key.
+    /// ≥ 0, `retries` ≤ 100, a non-empty `template`, a valid `limit_rate`,
+    /// known `include` sections and `[doc_ids]` entries naming known GraphQL
+    /// operations with numeric ids. The error names the offending key.
     pub fn validate(&self) -> Result<()> {
         if let Some(jobs) = self.jobs
             && !(1..=MAX_JOBS).contains(&jobs)
@@ -83,6 +122,21 @@ impl Settings {
             }
             for section in include {
                 ProfileSection::from_str(section).map_err(|err| with_context("include", err))?;
+            }
+        }
+        if let Some(ids) = &self.doc_ids {
+            for (name, id) in ids {
+                if doc_ids::operation(name).is_none() {
+                    return Err(Error::Config(format!(
+                        "doc_ids: unknown GraphQL operation '{name}' (expected one of {})",
+                        doc_ids::operation_names()
+                    )));
+                }
+                if !doc_ids::is_doc_id(id) {
+                    return Err(Error::Config(format!(
+                        "doc_ids: {name} must be a numeric doc id (got '{id}')"
+                    )));
+                }
             }
         }
         Ok(())
@@ -255,6 +309,10 @@ mod tests {
             user_agent = "Mozilla/5.0 Test"
             include = ["posts", "Stories"]
             set_mtime = false
+
+            [doc_ids]
+            PolarisProfilePostsTabContentQuery_connection = "123456789"
+            PolarisProfileReelsTabContentQuery_connection = 987654321
             "#,
         );
         let settings = load(Some(&path)).unwrap();
@@ -269,6 +327,24 @@ mod tests {
             Some(vec!["posts".to_string(), "Stories".to_string()])
         );
         assert_eq!(settings.set_mtime, Some(false));
+        assert_eq!(
+            settings.doc_ids,
+            Some(BTreeMap::from([
+                (
+                    "PolarisProfilePostsTabContentQuery_connection".to_string(),
+                    "123456789".to_string()
+                ),
+                (
+                    "PolarisProfileReelsTabContentQuery_connection".to_string(),
+                    "987654321".to_string()
+                ),
+            ]))
+        );
+        // Saved settings keep the table (as strings).
+        let text = toml::to_string_pretty(&settings).unwrap();
+        assert!(text.contains("[doc_ids]"), "{text}");
+        let again: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(again, settings);
     }
 
     #[test]
@@ -334,6 +410,14 @@ mod tests {
                 "include: unknown profile section 'likes'",
             ),
             ("include = []", "include must name at least one"),
+            (
+                "[doc_ids]\nNoSuchQuery = \"1\"",
+                "doc_ids: unknown GraphQL operation 'NoSuchQuery'",
+            ),
+            (
+                "[doc_ids]\nPolarisStoriesV3ReelPageGalleryQuery = \"12a\"",
+                "doc_ids: PolarisStoriesV3ReelPageGalleryQuery must be a numeric doc id",
+            ),
         ];
         for (contents, expected) in cases {
             let (_dir, path) = write_config(contents);

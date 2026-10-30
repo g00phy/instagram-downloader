@@ -233,45 +233,6 @@ impl MediaItem {
     }
 }
 
-/// `data.user` of `web_profile_info`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default)]
-pub struct ProfileUser {
-    #[serde(deserialize_with = "de_opt_id")]
-    pub id: Option<String>,
-    #[serde(deserialize_with = "de_opt_id")]
-    pub pk: Option<String>,
-    #[serde(deserialize_with = "de_nullable")]
-    pub username: String,
-    pub full_name: Option<String>,
-    #[serde(deserialize_with = "de_bool")]
-    pub is_private: bool,
-    #[serde(deserialize_with = "de_bool")]
-    pub followed_by_viewer: bool,
-}
-
-/// `/api/v1/users/web_profile_info/` response.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct WebProfileInfo {
-    #[serde(deserialize_with = "de_nullable")]
-    pub data: WebProfileData,
-}
-
-/// `data` of [`WebProfileInfo`].
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct WebProfileData {
-    pub user: Option<ProfileUser>,
-}
-
-/// `{ "user": … }` responses (`users/{id}/info/`, `accounts/current_user/`).
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct UserInfo {
-    pub user: Option<ProfileUser>,
-}
-
 /// `/api/v1/media/{id}/info/` response.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -280,46 +241,8 @@ pub struct MediaInfo {
     pub items: Vec<Value>,
 }
 
-/// Posts feed (`feed/user/{id}/`) and tagged feed (`usertags/{id}/feed/`) page.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct FeedPage {
-    #[serde(deserialize_with = "de_nullable")]
-    pub items: Vec<Value>,
-    #[serde(deserialize_with = "de_bool")]
-    pub more_available: bool,
-    #[serde(deserialize_with = "de_opt_id")]
-    pub next_max_id: Option<String>,
-}
-
-/// `POST /api/v1/clips/user/` page.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct ClipsPage {
-    #[serde(deserialize_with = "de_nullable")]
-    pub items: Vec<ClipsEntry>,
-    #[serde(deserialize_with = "de_nullable")]
-    pub paging_info: PagingInfo,
-}
-
-/// One entry of [`ClipsPage::items`].
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct ClipsEntry {
-    pub media: Value,
-}
-
-/// `paging_info` of [`ClipsPage`].
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct PagingInfo {
-    #[serde(deserialize_with = "de_bool")]
-    pub more_available: bool,
-    #[serde(deserialize_with = "de_opt_id")]
-    pub max_id: Option<String>,
-}
-
-/// A story reel or a highlight in a `feed/reels_media/` response.
+/// A story reel or a highlight: an entry of `feed/reels_media/` or a node of
+/// the `PolarisStoriesV3ReelPageGalleryQuery` connection.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Reel {
@@ -359,24 +282,6 @@ impl ReelsMedia {
             .or_else(|| self.reels_media.first())
             .or_else(|| self.reels.values().next())
     }
-}
-
-/// `/api/v1/highlights/{id}/highlights_tray/` response.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct HighlightsTray {
-    #[serde(deserialize_with = "de_nullable")]
-    pub tray: Vec<TrayEntry>,
-}
-
-/// One highlight in [`HighlightsTray`].
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct TrayEntry {
-    /// `highlight:N`.
-    #[serde(deserialize_with = "de_opt_id")]
-    pub id: Option<String>,
-    pub title: Option<String>,
 }
 
 #[cfg(test)]

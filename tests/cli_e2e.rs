@@ -5,8 +5,8 @@ use std::process::{Command, Output};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use wiremock::matchers::{method, path, query_param, query_param_is_missing};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::matchers::{method, path};
+use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 const SESSION: &str = "SESSION-SECRET-0123456789";
 const CSRF: &str = "CSRF-SECRET-abcdef";
@@ -239,6 +239,49 @@ fn post_url() -> String {
     format!("https://www.instagram.com/p/{SHORTCODE}/?igsh=tracking")
 }
 
+/// A profile page of the web app: the profile id and the GraphQL tokens.
+async fn mount_profile_page(env: &Env, username: &str, id: &str) {
+    let page = format!(
+        r#"<!DOCTYPE html><html><head><script type="application/json" id="__eqmc">{{"f":"FAKE-DTSG","l":"FakeLsd"}}</script></head><body><script type="application/json">{{"require":[["PolarisProfilePageContentQuery",{{"params":{{"username":"{username}"}}}},{{"profile_id":"{id}"}}]]}}</script></body></html>"#
+    );
+    Mock::given(method("GET"))
+        .and(path(format!("/{username}/")))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(page, "text/html"))
+        .mount(&env.server)
+        .await;
+}
+
+/// Matches the posts-grid GraphQL request with this `after` cursor.
+struct PostsQuery(Value);
+
+impl Match for PostsQuery {
+    fn matches(&self, request: &Request) -> bool {
+        let form: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(&request.body)
+                .into_owned()
+                .collect();
+        let variables: Value = form
+            .get("variables")
+            .and_then(|v| serde_json::from_str(v).ok())
+            .unwrap_or(Value::Null);
+        form.get("fb_api_req_friendly_name").map(String::as_str)
+            == Some("PolarisProfilePostsTabContentQuery_connection")
+            && variables.get("after") == Some(&self.0)
+    }
+}
+
+/// One page of the posts grid.
+fn posts_page(items: &[Value], next: Option<&str>) -> ResponseTemplate {
+    let edges: Vec<Value> = items.iter().map(|item| json!({"node": item})).collect();
+    ResponseTemplate::new(200).set_body_json(json!({
+        "data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {
+            "edges": edges,
+            "page_info": {"has_next_page": next.is_some(), "end_cursor": next}
+        }},
+        "status": "ok"
+    }))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn get_downloads_a_carousel_and_rerun_downloads_nothing() {
     let env = Env::new().await;
@@ -311,36 +354,22 @@ async fn dry_run_prints_plan_and_writes_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn grab_list_start_through_the_queue() {
     let env = Env::new().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/users/web_profile_info/"))
-        .and(query_param("username", "testuser"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {"user": {"id": "123", "username": "testuser", "full_name": "Test",
-                              "is_private": false, "followed_by_viewer": false}},
-            "status": "ok"
-        })))
-        .mount(&env.server)
-        .await;
+    mount_profile_page(&env, "testuser", "123").await;
     let posts = [
         single_post(&env, "Aaaaaaaaaa1", "3300000000000000101", TAKEN_AT + 300),
         single_post(&env, "Aaaaaaaaaa2", "3300000000000000102", TAKEN_AT + 200),
         single_post(&env, "Aaaaaaaaaa3", "3300000000000000103", TAKEN_AT + 100),
     ];
-    Mock::given(method("GET"))
-        .and(path("/api/v1/feed/user/123/"))
-        .and(query_param_is_missing("max_id"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [posts[0], posts[1]], "more_available": true, "next_max_id": "cursor-2",
-            "status": "ok"
-        })))
+    Mock::given(method("POST"))
+        .and(path("/graphql/query"))
+        .and(PostsQuery(Value::Null))
+        .respond_with(posts_page(&posts[..2], Some("cursor-2")))
         .mount(&env.server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/feed/user/123/"))
-        .and(query_param("max_id", "cursor-2"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [posts[2]], "more_available": false, "status": "ok"
-        })))
+    Mock::given(method("POST"))
+        .and(path("/graphql/query"))
+        .and(PostsQuery(json!("cursor-2")))
+        .respond_with(posts_page(&posts[2..], None))
         .mount(&env.server)
         .await;
     for n in 1..=3 {
@@ -450,11 +479,7 @@ async fn login_required_fails_with_hint_and_no_secrets() {
     run.assert_no_secrets();
     // The second link is never requested once authentication failed.
     let requests = env.server.received_requests().await.unwrap();
-    assert!(
-        requests
-            .iter()
-            .all(|r| !r.url.path().contains("web_profile_info"))
-    );
+    assert!(requests.iter().all(|r| r.url.path() != "/second/"));
     // The API saw the cookies; the example.com cookie was never sent.
     let cookie_header = requests[0]
         .headers
@@ -504,9 +529,10 @@ async fn expired_cookie_file_is_a_usage_error() {
 async fn cookies_check_reports_names_only() {
     let env = Env::new().await;
     Mock::given(method("GET"))
-        .and(path("/api/v1/users/999/info/"))
+        .and(path("/api/v1/accounts/edit/web_form_data/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "user": {"pk": "999", "username": "me_myself", "is_private": true},
+            "form_data": {"username": "me_myself", "email": "me@example.invalid",
+                          "phone_number": "+1 555 0100", "birthday": "1990-01-01"},
             "status": "ok"
         })))
         .mount(&env.server)
@@ -519,8 +545,15 @@ async fn cookies_check_reports_names_only() {
 
     let online = env.igdl_auth(&["cookies", "check", "--online"]).await;
     assert_eq!(online.code, 0, "{}", online.debug());
-    assert!(online.stdout.contains("@me_myself"), "{}", online.debug());
+    assert!(online.stdout.contains("@me_myself (id 999)"), "{}", online.debug());
     online.assert_no_secrets();
+    for private in ["me@example.invalid", "+1 555 0100", "1990-01-01"] {
+        assert!(
+            !online.stdout.contains(private) && !online.stderr.contains(private),
+            "{}",
+            online.debug()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

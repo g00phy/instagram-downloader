@@ -17,7 +17,8 @@ use crate::naming::{DEFAULT_TEMPLATE, PLACEHOLDERS, render, validate_template};
 /// Values the downloader uses when the settings leave them unset.
 const DEFAULT_JOBS: usize = 4;
 const DEFAULT_RETRIES: u32 = 5;
-const DEFAULT_API_DELAY: f64 = 1.5;
+/// [`crate::instagram::DEFAULT_API_DELAY`] in seconds.
+const DEFAULT_API_DELAY: f64 = 6.0;
 
 /// The settings as edited, plus the settings they started from.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +85,7 @@ impl SettingsForm {
             user_agent: text_field(&self.user_agent, &original.user_agent),
             include: sections_field(&self.sections, &original.include),
             set_mtime: value_field(self.set_mtime, original.set_mtime, true),
+            doc_ids: original.doc_ids.clone(),
         }
     }
 
@@ -411,7 +413,7 @@ impl SettingsView {
                     .suffix(" s"),
             )
             .labelled_by(label.id);
-            ui.label(RichText::new("pause between Instagram API requests").weak());
+            ui.label(RichText::new("pause between Instagram API requests (+ up to 100 % at random)").weak());
         });
         ui.end_row();
 
@@ -546,6 +548,10 @@ mod tests {
             user_agent: Some("Mozilla/5.0 Test".into()),
             include: Some(vec!["posts".into(), "Stories".into()]),
             set_mtime: Some(false),
+            doc_ids: Some(std::collections::BTreeMap::from([(
+                "PolarisProfilePostsTabContentQuery_connection".into(),
+                "123".into(),
+            )])),
         }
     }
 

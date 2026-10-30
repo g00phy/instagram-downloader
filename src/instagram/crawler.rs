@@ -1,24 +1,35 @@
 //! Resolving a [`Target`] into the files to download.
+//!
+//! * Posts: `GET /api/v1/media/{id}/info/`.
+//! * Profiles: the profile page (id, tokens), then the web app's GraphQL
+//!   operations: the posts grid (items in the v1 media format), the reels and
+//!   tagged tabs (shortcodes, then `media/{id}/info/` per post) and the
+//!   highlights tray.
+//! * Stories and highlight items: `feed/reels_media/` first, the
+//!   `PolarisStoriesV3ReelPageGalleryQuery` operation when that endpoint answers
+//!   with a 5xx, a redirect or HTML.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
 use crate::instagram::Client;
-use crate::instagram::client::UserSummary;
+use crate::instagram::client::{ApiRequest, CallOptions, UserSummary};
+use crate::instagram::doc_ids::{self, Operation};
 use crate::instagram::extract::{ItemContext, media_files};
-use crate::instagram::models::{
-    self, ClipsPage, FeedPage, HighlightsTray, MediaInfo, MediaItem, ReelsMedia, parse_item,
-};
+use crate::instagram::models::{self, MediaInfo, MediaItem, Reel, ReelsMedia, parse_item};
 use crate::links::{ProfileSection, Target, shortcode_to_media_id};
 use crate::model::{Category, MediaFile, MediaKind};
 
-/// Posts requested per feed page.
-const PAGE_SIZE: &str = "12";
+/// Posts requested per GraphQL page (the web app's value).
+const PAGE_SIZE: u32 = 12;
 
-/// Highlights fetched per `reels_media` request.
+/// Highlights fetched per reels request.
 const HIGHLIGHT_CHUNK: usize = 5;
+
+/// Most pages read from one stories connection.
+const MAX_STORY_PAGES: usize = 50;
 
 /// Crawl filters and limits.
 #[derive(Debug, Clone)]
@@ -74,6 +85,7 @@ pub async fn resolve(
     is_archived: &(dyn Fn(&str) -> bool + Send + Sync),
 ) -> Result<Resolved> {
     let mut out = Collector::new(options.only);
+    let mut session = Session::new(client);
     let name = match target {
         Target::Post { shortcode, index } => {
             resolve_post(client, shortcode, *index, &mut out).await?
@@ -83,15 +95,22 @@ pub async fn resolve(
                 Some(section) => vec![*section],
                 None => options.sections.clone(),
             };
-            resolve_profile(client, username, &sections, options, is_archived, &mut out).await?
+            resolve_profile(
+                &mut session,
+                username,
+                &sections,
+                options,
+                is_archived,
+                &mut out,
+            )
+            .await?
         }
         Target::Stories { username, story_id } => {
             let user = client.user_by_username(username).await?;
-            ensure_visible(client, &user)?;
-            crawl_stories(client, &user, story_id.as_deref(), &mut out).await?;
+            crawl_stories(&mut session, &user, story_id.as_deref(), &mut out).await?;
             format!("{} · stories", user.username)
         }
-        Target::Highlight { id } => resolve_highlight(client, id, &mut out).await?,
+        Target::Highlight { id } => resolve_highlight(&mut session, id, &mut out).await?,
     };
     Ok(out.finish(name))
 }
@@ -191,14 +210,66 @@ impl Collector {
     }
 }
 
-/// `items[0]` of `/api/v1/media/{id}/info/`.
+/// State of one `resolve` call.
+struct Session<'a> {
+    client: &'a Client,
+    /// `feed/reels_media/` failed in a way the GraphQL fallback covers: skip it.
+    rest_reels_failed: bool,
+    /// Reels seen in the posts grid, by shortcode (saves a `media/info` call
+    /// each when the reels tab is crawled too).
+    known_clips: HashMap<String, MediaItem>,
+    keep_clips: bool,
+}
+
+impl<'a> Session<'a> {
+    fn new(client: &'a Client) -> Self {
+        Session {
+            client,
+            rest_reels_failed: false,
+            known_clips: HashMap::new(),
+            keep_clips: false,
+        }
+    }
+
+    /// The media item of a shortcode: a reel already seen in the posts grid,
+    /// else `media/{id}/info/`.
+    async fn media_by_code(&mut self, code: &str) -> Result<MediaItem> {
+        if let Some(item) = self.known_clips.get(code) {
+            return Ok(item.clone());
+        }
+        let media_id = shortcode_to_media_id(code)?;
+        fetch_media_item(self.client, &media_id.to_string()).await
+    }
+
+    /// Story or highlight reels: `feed/reels_media/` first, the stories
+    /// GraphQL operation when that fails with a 5xx, a redirect or HTML.
+    async fn reels(&mut self, reel_ids: &[&str], username: Option<&str>) -> Result<ReelsMedia> {
+        if !self.rest_reels_failed {
+            match rest_reels(self.client, reel_ids).await {
+                Ok(media) => return Ok(media),
+                Err(err) if rest_reels_fallback(&err) => {
+                    tracing::info!(error = %err, "feed/reels_media failed; using the web app's stories query instead");
+                    self.rest_reels_failed = true;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        graphql_reels(self.client, reel_ids, username).await
+    }
+}
+
+/// `items[0]` of `/api/v1/media/{id}/info/`. A redirect to the home page or
+/// the login page means the cookies were not accepted.
 async fn fetch_media_item(client: &Client, media_id: &str) -> Result<MediaItem> {
     if media_id.is_empty() || !media_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err(Error::Parse(format!("invalid media id '{media_id}'")));
     }
-    let value = client
-        .get_json(&format!("/api/v1/media/{media_id}/info/"))
-        .await?;
+    let path = format!("/api/v1/media/{media_id}/info/");
+    let options = CallOptions {
+        home_redirect_is_auth: true,
+        ..CallOptions::default()
+    };
+    let value = client.api(&ApiRequest::get(&path).options(options)).await?;
     let info: MediaInfo = models::parse(value, "media info")?;
     info.items
         .first()
@@ -247,20 +318,29 @@ async fn resolve_post(
     })
 }
 
-/// `Private` unless the profile is public, followed, or the viewer's own.
-fn ensure_visible(client: &Client, user: &UserSummary) -> Result<()> {
-    let is_self = client.viewer_id().as_deref() == Some(user.id.as_str());
-    if user.is_private && !user.followed_by_viewer && !is_self {
-        return Err(Error::Private(format!(
-            "@{} is private and you don't follow it",
+/// Whether `user` is the account the cookies belong to.
+fn is_viewer(client: &Client, user: &UserSummary) -> bool {
+    client.viewer_id().as_deref() == Some(user.id.as_str())
+}
+
+/// The error for a section Instagram would not show.
+fn private_error(user: &UserSummary, section: &str, detail: Option<&str>) -> Error {
+    if user.is_private {
+        Error::Private(format!(
+            "@{} is private and you don't follow it (or it has no {section})",
             user.username
-        )));
+        ))
+    } else {
+        let detail = detail.map(|d| format!(": {d}")).unwrap_or_default();
+        Error::Private(format!(
+            "Instagram refused to show @{}'s {section}{detail}",
+            user.username
+        ))
     }
-    Ok(())
 }
 
 async fn resolve_profile(
-    client: &Client,
+    session: &mut Session<'_>,
     username: &str,
     sections: &[ProfileSection],
     options: &CrawlOptions,
@@ -276,21 +356,22 @@ async fn resolve_profile(
     if unique.is_empty() {
         return Err(Error::Config("no profile sections selected".into()));
     }
-    let user = client.user_by_username(username).await?;
-    ensure_visible(client, &user)?;
+    let user = session.client.user_by_username(username).await?;
+    session.keep_clips =
+        unique.contains(&ProfileSection::Posts) && unique.contains(&ProfileSection::Reels);
     for section in &unique {
         let result = match section {
             ProfileSection::Posts => {
-                crawl_feed(client, &user, Feed::Posts, options, is_archived, out).await
+                crawl_feed(session, &user, Feed::Posts, options, is_archived, out).await
             }
             ProfileSection::Reels => {
-                crawl_feed(client, &user, Feed::Reels, options, is_archived, out).await
+                crawl_feed(session, &user, Feed::Reels, options, is_archived, out).await
             }
             ProfileSection::Tagged => {
-                crawl_feed(client, &user, Feed::Tagged, options, is_archived, out).await
+                crawl_feed(session, &user, Feed::Tagged, options, is_archived, out).await
             }
-            ProfileSection::Stories => crawl_stories(client, &user, None, out).await,
-            ProfileSection::Highlights => crawl_highlights(client, &user, options, out).await,
+            ProfileSection::Stories => crawl_stories(session, &user, None, out).await,
+            ProfileSection::Highlights => crawl_highlights(session, &user, options, out).await,
         };
         match result {
             // One missing or malformed section should not sink the others.
@@ -328,62 +409,80 @@ impl Feed {
             Feed::Tagged => Category::Tagged,
         }
     }
-}
 
-/// One page of a paginated section.
-struct Page {
-    items: Vec<Value>,
-    more_available: bool,
-    next_max_id: Option<String>,
-}
-
-async fn fetch_feed_page(
-    client: &Client,
-    feed: Feed,
-    user_id: &str,
-    max_id: Option<&str>,
-) -> Result<Page> {
-    let cursor = max_id
-        .map(|m| {
-            format!(
-                "&max_id={}",
-                url::form_urlencoded::byte_serialize(m.as_bytes()).collect::<String>()
-            )
-        })
-        .unwrap_or_default();
-    match feed {
-        Feed::Posts | Feed::Tagged => {
-            let path = if feed == Feed::Posts {
-                format!("/api/v1/feed/user/{user_id}/?count={PAGE_SIZE}{cursor}")
-            } else {
-                format!("/api/v1/usertags/{user_id}/feed/?count={PAGE_SIZE}{cursor}")
-            };
-            let page: FeedPage = models::parse(client.get_json(&path).await?, feed.name())?;
-            Ok(Page {
-                items: page.items,
-                more_available: page.more_available,
-                next_max_id: page.next_max_id,
-            })
+    fn operation(self) -> &'static Operation {
+        match self {
+            Feed::Posts => &doc_ids::POSTS,
+            Feed::Reels => &doc_ids::REELS,
+            Feed::Tagged => &doc_ids::TAGGED,
         }
-        Feed::Reels => {
-            let mut form = vec![("target_user_id", user_id), ("page_size", PAGE_SIZE)];
-            if let Some(max_id) = max_id {
-                form.push(("max_id", max_id));
-            }
-            let value = client.post_form("/api/v1/clips/user/", &form).await?;
-            let page: ClipsPage = models::parse(value, "reels")?;
-            Ok(Page {
-                items: page.items.into_iter().map(|entry| entry.media).collect(),
-                more_available: page.paging_info.more_available,
-                next_max_id: page.paging_info.max_id,
-            })
+    }
+
+    /// The operation's variables (gallery-dl 1.32.17's `user_feed`,
+    /// `user_reels`, `user_tagged`).
+    fn variables(self, user: &UserSummary, after: Option<&str>) -> Value {
+        match self {
+            Feed::Posts => json!({
+                "after": after,
+                "before": null,
+                "data": {
+                    "count": PAGE_SIZE,
+                    "include_reel_media_seen_timestamp": true,
+                    "include_relationship_info": true,
+                    "latest_besties_reel_media": true,
+                    "latest_reel_media": true
+                },
+                "first": PAGE_SIZE,
+                "include_multi_captions": true,
+                "last": null,
+                "username": user.username,
+                "__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider": true,
+                "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": true,
+                "__relay_internal__pv__PolarisThreadsStyleCommentsEnabledrelayprovider": false,
+                "__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider": false
+            }),
+            Feed::Reels => json!({
+                "after": after,
+                "data": {
+                    "include_feed_video": true,
+                    "page_size": PAGE_SIZE,
+                    "target_user_id": user.id
+                },
+                "first": PAGE_SIZE,
+                "id": user.id,
+                "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": false
+            }),
+            Feed::Tagged => json!({
+                "after": after,
+                "before": null,
+                "count": PAGE_SIZE,
+                "first": PAGE_SIZE,
+                "last": null,
+                "user_id": user.id,
+                "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": true
+            }),
         }
     }
 }
 
+/// The shortcode of a reels / tagged connection node.
+fn node_code(node: &Value) -> Option<String> {
+    node.get("media")
+        .and_then(|media| media.get("code"))
+        .or_else(|| node.get("code"))
+        .and_then(Value::as_str)
+        .filter(|code| {
+            !code.is_empty()
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+        .map(str::to_string)
+}
+
 /// Crawls posts / reels / tagged with pagination, filters and limits.
 async fn crawl_feed(
-    client: &Client,
+    session: &mut Session<'_>,
     user: &UserSummary,
     feed: Feed,
     options: &CrawlOptions,
@@ -394,26 +493,70 @@ async fn crawl_feed(
         return Ok(());
     }
     let section = feed.name();
+    let viewer = is_viewer(session.client, user);
     let mut kept_posts = 0usize;
-    let mut max_id: Option<String> = None;
+    let mut cursor: Option<String> = None;
     let mut seen_cursors: HashSet<String> = HashSet::new();
     let mut page_number = 0u32;
     let mut unreadable = 0usize;
+    let mut unavailable = 0usize;
     'pages: loop {
         page_number += 1;
-        let page = fetch_feed_page(client, feed, &user.id, max_id.as_deref()).await?;
+        let variables = feed.variables(user, cursor.as_deref());
+        let page = match session
+            .client
+            .graphql_connection(feed.operation(), &variables, Some(&user.username))
+            .await
+        {
+            Err(Error::Private(detail)) if !viewer => {
+                return Err(private_error(user, section, Some(&detail)));
+            }
+            other => other?,
+        };
         tracing::info!(
             user = %user.username,
             section,
             page = page_number,
-            items = page.items.len(),
+            items = page.nodes.len(),
             "fetched page"
         );
-        let total = page.items.len();
-        for (position, value) in page.items.iter().enumerate() {
-            let Some(item) = parse_item(value) else {
-                unreadable += 1;
-                continue;
+        if page_number == 1 && page.nodes.is_empty() && !page.has_next && user.is_private && !viewer
+        {
+            return Err(private_error(user, section, None));
+        }
+        let total = page.nodes.len();
+        for (position, node) in page.nodes.iter().enumerate() {
+            let item = match feed {
+                Feed::Posts => match parse_item(node) {
+                    Some(item) => {
+                        if session.keep_clips
+                            && item.is_clip()
+                            && let Some(code) = &item.code
+                        {
+                            session.known_clips.insert(code.clone(), item.clone());
+                        }
+                        item
+                    }
+                    None => {
+                        unreadable += 1;
+                        continue;
+                    }
+                },
+                Feed::Reels | Feed::Tagged => {
+                    let Some(code) = node_code(node) else {
+                        unreadable += 1;
+                        continue;
+                    };
+                    match session.media_by_code(&code).await {
+                        Ok(item) => item,
+                        Err(Error::NotFound(_) | Error::Unsupported(_)) => {
+                            tracing::debug!(section, code = %code, "post not available");
+                            unavailable += 1;
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
             };
             let pinned = item.is_pinned();
             if options.until.is_some_and(|until| item.taken_at > until) {
@@ -448,17 +591,17 @@ async fn crawl_feed(
             out.push(files);
             kept_posts += 1;
             if options.limit.is_some_and(|limit| kept_posts >= limit) {
-                if position + 1 < total || page.more_available {
+                if position + 1 < total || page.has_next {
                     out.note(format!("{section}: limited to {kept_posts} post(s)"));
                 }
                 break 'pages;
             }
         }
-        if !page.more_available {
+        if !page.has_next {
             break;
         }
-        match page.next_max_id {
-            Some(next) if seen_cursors.insert(next.clone()) => max_id = Some(next),
+        match page.end_cursor {
+            Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
             _ => {
                 tracing::debug!(section, "pagination cursor missing or repeated; stopping");
                 break;
@@ -470,20 +613,93 @@ async fn crawl_feed(
             "{section}: skipped {unreadable} unreadable item(s)"
         ));
     }
+    if unavailable > 0 {
+        out.note(format!(
+            "{section}: skipped {unavailable} post(s) that are no longer available"
+        ));
+    }
     Ok(())
+}
+
+/// Whether a failed `feed/reels_media/` call is worth the GraphQL fallback:
+/// a 5xx, a redirect, or a body that is not the expected JSON.
+fn rest_reels_fallback(err: &Error) -> bool {
+    match err {
+        Error::Http { status, .. } => *status >= 500 || (300..400).contains(status),
+        Error::Parse(_) => true,
+        _ => false,
+    }
+}
+
+/// `/api/v1/feed/reels_media/?reel_ids=A&reel_ids=B…` (one attempt: the
+/// fallback is cheaper than retrying an endpoint that answers with 500s).
+async fn rest_reels(client: &Client, reel_ids: &[&str]) -> Result<ReelsMedia> {
+    // The serializer is not `Send`: finish it before the `.await`.
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(reel_ids.iter().map(|id| ("reel_ids", *id)))
+        .finish();
+    let path = format!("/api/v1/feed/reels_media/?{query}");
+    let options = CallOptions {
+        retry_transient: false,
+        ..CallOptions::default()
+    };
+    let value = client.api(&ApiRequest::get(&path).options(options)).await?;
+    models::parse(value, "stories")
+}
+
+/// The reels of `reel_ids` via `PolarisStoriesV3ReelPageGalleryQuery`.
+async fn graphql_reels(
+    client: &Client,
+    reel_ids: &[&str],
+    username: Option<&str>,
+) -> Result<ReelsMedia> {
+    let Some(first) = reel_ids.first() else {
+        return Ok(ReelsMedia::default());
+    };
+    let mut reels: Vec<Reel> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors: HashSet<String> = HashSet::new();
+    for _ in 0..MAX_STORY_PAGES {
+        let variables = json!({
+            "after": cursor,
+            "first": 3,
+            "initial_reel_id": first,
+            "last": 2,
+            "reel_ids": reel_ids,
+            "__relay_internal__pv__PolarisCommunityNoteStoriesLabelEnabledrelayprovider": true
+        });
+        let page = client
+            .graphql_connection(&doc_ids::STORIES, &variables, username)
+            .await?;
+        for node in page.nodes {
+            match serde_json::from_value::<Reel>(node) {
+                Ok(reel) => reels.push(reel),
+                Err(err) => tracing::debug!(error = %err, "skipping an unreadable reel"),
+            }
+        }
+        match page.end_cursor {
+            Some(next) if page.has_next && seen_cursors.insert(next.clone()) => {
+                cursor = Some(next);
+            }
+            _ => break,
+        }
+    }
+    Ok(ReelsMedia {
+        reels_media: reels,
+        reels: HashMap::new(),
+    })
 }
 
 /// Current stories of `user`; `story_id` keeps a single item.
 async fn crawl_stories(
-    client: &Client,
+    session: &mut Session<'_>,
     user: &UserSummary,
     story_id: Option<&str>,
     out: &mut Collector,
 ) -> Result<()> {
-    let value = client
-        .get_json(&format!("/api/v1/feed/reels_media/?reel_ids={}", user.id))
+    let media = session
+        .reels(&[user.id.as_str()], Some(&user.username))
         .await?;
-    let media: ReelsMedia = models::parse(value, "stories")?;
     let reel = media.find_or_first(&user.id);
     let items = reel.map(|r| r.items.as_slice()).unwrap_or_default();
     tracing::info!(user = %user.username, section = "stories", items = items.len(), "fetched page");
@@ -497,7 +713,12 @@ async fn crawl_stories(
         if let Some(id) = story_id {
             return Err(missing_story(id));
         }
-        out.note(format!("@{} has no current stories", user.username));
+        let hidden = if user.is_private && !is_viewer(session.client, user) {
+            " (it is private: stories show only to followers)"
+        } else {
+            ""
+        };
+        out.note(format!("@{} has no current stories{hidden}", user.username));
         return Ok(());
     }
     let owner = reel
@@ -544,18 +765,6 @@ fn highlight_reel_id(id: &str) -> String {
     }
 }
 
-/// `/api/v1/feed/reels_media/?reel_ids=A&reel_ids=B…`.
-async fn fetch_reels(client: &Client, reel_ids: &[&str]) -> Result<ReelsMedia> {
-    // The serializer is not `Send`: finish it before the `.await`.
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(reel_ids.iter().map(|id| ("reel_ids", *id)))
-        .finish();
-    let value = client
-        .get_json(&format!("/api/v1/feed/reels_media/?{query}"))
-        .await?;
-    models::parse(value, "highlights")
-}
-
 /// Adds the items of one highlight reel.
 fn push_highlight_items(
     out: &mut Collector,
@@ -582,26 +791,49 @@ fn push_highlight_items(
     }
 }
 
+/// `(highlight:N, title)` of the highlights tray operation's result.
+fn tray_entries(data: &Value) -> Vec<(String, String)> {
+    data.get("highlights")
+        .and_then(|highlights| highlights.get("edges"))
+        .and_then(Value::as_array)
+        .map(|edges| {
+            edges
+                .iter()
+                .filter_map(|edge| {
+                    let node = edge.get("node")?;
+                    let id = models::id_from_value(node.get("id")?)?;
+                    let title = node
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    Some((highlight_reel_id(&id), title))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Every highlight of `user` (at most `options.limit` of them).
 async fn crawl_highlights(
-    client: &Client,
+    session: &mut Session<'_>,
     user: &UserSummary,
     options: &CrawlOptions,
     out: &mut Collector,
 ) -> Result<()> {
-    let value = client
-        .get_json(&format!("/api/v1/highlights/{}/highlights_tray/", user.id))
-        .await?;
-    let tray: HighlightsTray = models::parse(value, "highlights tray")?;
-    let mut entries: Vec<(String, String)> = tray
-        .tray
-        .into_iter()
-        .filter_map(|entry| {
-            let id = highlight_reel_id(&entry.id?);
-            let title = entry.title.unwrap_or_default();
-            Some((id, title))
-        })
-        .collect();
+    let viewer = is_viewer(session.client, user);
+    let variables = json!({"user_id": user.id});
+    let data = match session
+        .client
+        .graphql(&doc_ids::HIGHLIGHTS_TRAY, &variables, Some(&user.username))
+        .await
+    {
+        Err(Error::Private(detail)) if !viewer => {
+            return Err(private_error(user, "highlights", Some(&detail)));
+        }
+        other => other?,
+    };
+    let mut entries = tray_entries(&data);
     tracing::info!(
         user = %user.username,
         section = "highlights",
@@ -623,7 +855,7 @@ async fn crawl_highlights(
     }
     for (chunk_number, chunk) in entries.chunks(HIGHLIGHT_CHUNK).enumerate() {
         let ids: Vec<&str> = chunk.iter().map(|(id, _)| id.as_str()).collect();
-        let media = fetch_reels(client, &ids).await?;
+        let media = session.reels(&ids, Some(&user.username)).await?;
         tracing::info!(
             user = %user.username,
             section = "highlights",
@@ -648,11 +880,15 @@ async fn crawl_highlights(
 }
 
 /// A single highlight link.
-async fn resolve_highlight(client: &Client, id: &str, out: &mut Collector) -> Result<String> {
+async fn resolve_highlight(
+    session: &mut Session<'_>,
+    id: &str,
+    out: &mut Collector,
+) -> Result<String> {
     let reel_id = highlight_reel_id(id);
     let numeric = reel_id.trim_start_matches("highlight:").to_string();
     let not_found = || Error::NotFound(format!("highlight {numeric}"));
-    let media = match fetch_reels(client, &[&reel_id]).await {
+    let media = match session.reels(&[&reel_id], None).await {
         Err(Error::NotFound(_)) => return Err(not_found()),
         other => other?,
     };
@@ -675,4 +911,70 @@ async fn resolve_highlight(client: &Client, id: &str, out: &mut Collector) -> Re
     } else {
         format!("{owner} · highlight {label}")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_codes() {
+        assert_eq!(
+            node_code(&json!({"media": {"code": "Abc_-1"}})).as_deref(),
+            Some("Abc_-1")
+        );
+        assert_eq!(node_code(&json!({"code": "Xyz"})).as_deref(), Some("Xyz"));
+        assert_eq!(node_code(&json!({"code": "../etc"})), None);
+        assert_eq!(node_code(&json!({"media": {}})), None);
+    }
+
+    #[test]
+    fn tray_entries_get_highlight_ids() {
+        let data = json!({"highlights": {"edges": [
+            {"node": {"id": "highlight:17", "title": "Trip"}},
+            {"node": {"id": 18}},
+            {"node": {"title": "no id"}}
+        ]}});
+        assert_eq!(
+            tray_entries(&data),
+            vec![
+                ("highlight:17".to_string(), "Trip".to_string()),
+                ("highlight:18".to_string(), String::new())
+            ]
+        );
+        assert!(tray_entries(&json!({"highlights": null})).is_empty());
+    }
+
+    #[test]
+    fn fallback_errors() {
+        let http = |status| Error::Http {
+            status,
+            message: String::new(),
+        };
+        assert!(rest_reels_fallback(&http(500)));
+        assert!(rest_reels_fallback(&http(302)));
+        assert!(rest_reels_fallback(&Error::Parse("html".into())));
+        assert!(!rest_reels_fallback(&http(404)));
+        assert!(!rest_reels_fallback(&Error::RateLimited("x".into())));
+        assert!(!rest_reels_fallback(&Error::Auth("x".into())));
+    }
+
+    #[test]
+    fn variables_follow_gallery_dl() {
+        let user = UserSummary {
+            id: "1001".into(),
+            username: "alice".into(),
+            full_name: None,
+            is_private: false,
+            followed_by_viewer: false,
+        };
+        let posts = Feed::Posts.variables(&user, None);
+        assert_eq!(posts["username"], "alice");
+        assert_eq!(posts["after"], Value::Null);
+        assert_eq!(posts["data"]["count"], 12);
+        let reels = Feed::Reels.variables(&user, Some("c1"));
+        assert_eq!(reels["data"]["target_user_id"], "1001");
+        assert_eq!(reels["after"], "c1");
+        assert_eq!(Feed::Tagged.variables(&user, None)["user_id"], "1001");
+    }
 }

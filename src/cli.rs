@@ -12,7 +12,9 @@ use crate::app::{self, ListView, Options, Report};
 use crate::config::{self, Settings};
 use crate::download::DownloadConfig;
 use crate::error::{Error, ErrorKind, Result};
-use crate::instagram::{ClientConfig, CrawlOptions, DEFAULT_API_BASE, DEFAULT_USER_AGENT};
+use crate::instagram::{
+    ClientConfig, CrawlOptions, DEFAULT_API_BASE, DEFAULT_API_DELAY, DEFAULT_USER_AGENT,
+};
 use crate::links::ProfileSection;
 use crate::model::MediaKind;
 use crate::naming::DEFAULT_TEMPLATE;
@@ -54,7 +56,7 @@ pub struct GlobalArgs {
     /// User agent for API requests (best: the browser the cookies came from)
     #[arg(long, global = true, value_name = "UA")]
     pub user_agent: Option<String>,
-    /// Minimum seconds between Instagram API requests [default: 1.5]
+    /// Minimum seconds between Instagram API requests; a random 0-100 % is added [default: 6]
     #[arg(long, global = true, value_name = "SECS")]
     pub api_delay: Option<f64>,
     /// Instagram API base URL (for testing against a mock server)
@@ -429,7 +431,10 @@ pub fn resolve_options(
     crawl: Option<&CrawlArgs>,
     download: &DownloadArgs,
 ) -> Result<Options> {
-    let api_delay = global.api_delay.or(settings.api_delay).unwrap_or(1.5);
+    let api_delay = global
+        .api_delay
+        .or(settings.api_delay)
+        .unwrap_or(DEFAULT_API_DELAY.as_secs_f64());
     if !api_delay.is_finite() || api_delay < 0.0 {
         return Err(Error::Config(
             "--api-delay must be 0 or more seconds".into(),
@@ -446,10 +451,13 @@ pub fn resolve_options(
         .unwrap_or_else(|| DEFAULT_API_BASE.to_string())
         .trim_end_matches('/')
         .to_string();
+    let data_dir = data_dir(global, settings)?;
     let client = ClientConfig {
         api_base,
         user_agent: user_agent.clone(),
         api_delay: Duration::from_secs_f64(api_delay),
+        cache_dir: Some(data_dir.clone()),
+        doc_ids: settings.doc_ids.clone().unwrap_or_default(),
         ..ClientConfig::default()
     };
 
@@ -533,7 +541,7 @@ pub fn resolve_options(
 
     Ok(Options {
         cookies,
-        data_dir: data_dir(global, settings)?,
+        data_dir,
         out_dir,
         template,
         client,
@@ -614,6 +622,37 @@ mod tests {
         assert!(Cli::try_parse_from(["igdl", "start", "-j", "0"]).is_err());
         assert!(Cli::try_parse_from(["igdl", "start", "-j", "33"]).is_err());
         assert!(Cli::try_parse_from(["igdl", "start", "-j", "8"]).is_ok());
+    }
+
+    #[test]
+    fn default_api_delay_and_client_wiring() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = GlobalArgs {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..GlobalArgs::default()
+        };
+        let settings = Settings {
+            doc_ids: Some(std::collections::BTreeMap::from([(
+                "PolarisProfilePostsTabContentQuery_connection".to_string(),
+                "42".to_string(),
+            )])),
+            ..Settings::default()
+        };
+        let options =
+            resolve_options(&global, &settings, None, &DownloadArgs::default()).unwrap();
+        assert_eq!(options.client.api_delay, Duration::from_secs(6));
+        assert_eq!(options.client.cache_dir.as_deref(), Some(dir.path()));
+        assert_eq!(
+            options.client.doc_ids["PolarisProfilePostsTabContentQuery_connection"],
+            "42"
+        );
+        let global = GlobalArgs {
+            api_delay: Some(0.5),
+            ..global
+        };
+        let options =
+            resolve_options(&global, &settings, None, &DownloadArgs::default()).unwrap();
+        assert_eq!(options.client.api_delay, Duration::from_millis(500));
     }
 
     #[test]
