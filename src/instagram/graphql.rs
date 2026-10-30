@@ -67,7 +67,7 @@ impl Client {
         let page = op.page_path(username);
         let variables = serde_json::to_string(variables)
             .map_err(|err| Error::Parse(format!("cannot encode GraphQL variables: {err}")))?;
-        let (mut doc_id, source) = self.doc_id(op, &page).await;
+        let (mut doc_id, source) = self.doc_id(op, &page).await?;
         let tokens = self.tokens_for(&page).await?;
         let mut retried = false;
         loop {
@@ -87,7 +87,7 @@ impl Client {
                     let text = self.server_text(&text);
                     tracing::warn!(query = op.name, doc_id = %doc_id, "Instagram rejected the query: {text}");
                     if !retried
-                        && let Some(next) = self.next_doc_id(op, &page, &doc_id, source).await
+                        && let Some(next) = self.next_doc_id(op, &page, &doc_id, source).await?
                     {
                         tracing::info!(query = op.name, doc_id = %next, "retrying with another doc id");
                         doc_id = next;
@@ -120,22 +120,22 @@ impl Client {
 
     /// The doc id for `op`: config, else a fresh cache entry, else discovery
     /// on `page` (once per page and session), else the built-in default.
-    async fn doc_id(&self, op: &'static Operation, page: &str) -> (String, Source) {
+    async fn doc_id(&self, op: &'static Operation, page: &str) -> Result<(String, Source)> {
         let mut state = self.doc_ids.lock().await;
         if let Some(id) = state.overrides.get(op.name) {
-            return (id.clone(), Source::Config);
+            return Ok((id.clone(), Source::Config));
         }
         state.ensure_loaded();
         if let Some(id) = state.cache.fresh(op.name, unix_now()) {
-            return (id.to_string(), Source::Cache);
+            return Ok((id.to_string(), Source::Cache));
         }
         if !state.scanned_pages.contains(page) {
-            let found = self.discover(page, &mut state).await;
+            let found = self.discover(page, &mut state).await?;
             if let Some(id) = found.get(op.name) {
-                return (id.clone(), Source::Discovered);
+                return Ok((id.clone(), Source::Discovered));
             }
         }
-        (op.default_doc_id.to_string(), Source::Default)
+        Ok((op.default_doc_id.to_string(), Source::Default))
     }
 
     /// After `failed` was rejected as outdated: forgets it in the cache,
@@ -147,9 +147,9 @@ impl Client {
         page: &str,
         failed: &str,
         source: Source,
-    ) -> Option<String> {
+    ) -> Result<Option<String>> {
         if source == Source::Config {
-            return None;
+            return Ok(None);
         }
         let mut state = self.doc_ids.lock().await;
         state.ensure_loaded();
@@ -166,26 +166,36 @@ impl Client {
         let mut candidate = None;
         if state.rediscovered.insert(op.name) && !state.scanned_pages.contains(page) {
             tracing::info!(query = op.name, "looking for a newer doc id");
-            let found = self.discover(page, &mut state).await;
+            let found = self.discover(page, &mut state).await?;
             dirty &= found.is_empty();
             candidate = found.get(op.name).filter(|id| *id != failed).cloned();
         }
         if dirty {
             save_cache(&state).await;
         }
-        candidate.or_else(|| (op.default_doc_id != failed).then(|| op.default_doc_id.to_string()))
+        Ok(candidate
+            .or_else(|| (op.default_doc_id != failed).then(|| op.default_doc_id.to_string())))
     }
 
     /// Scans the JS bundles referenced by `page` for doc ids (without cookies)
-    /// and records what it finds. Failures are logged, never returned.
-    async fn discover(&self, page: &str, state: &mut DocIdState) -> BTreeMap<&'static str, String> {
+    /// and records what it finds. Failures only fall back to the defaults,
+    /// except the ones the GraphQL call itself would share (rate limit, login,
+    /// cancellation), which end the operation.
+    async fn discover(
+        &self,
+        page: &str,
+        state: &mut DocIdState,
+    ) -> Result<BTreeMap<&'static str, String>> {
         state.scanned_pages.insert(page.to_string());
         let mut found: BTreeMap<&'static str, String> = BTreeMap::new();
         let info = match self.page_info(page, false).await {
             Ok(info) => info,
+            Err(err @ (Error::Auth(_) | Error::RateLimited(_) | Error::Cancelled)) => {
+                return Err(err);
+            }
             Err(err) => {
                 tracing::debug!(page = %page, error = %err, "doc id discovery: cannot load the page");
-                return found;
+                return Ok(found);
             }
         };
         for url in info.bundles.iter().take(MAX_BUNDLES) {
@@ -205,12 +215,12 @@ impl Client {
         }
         if found.is_empty() {
             tracing::debug!(page = %page, bundles = info.bundles.len(), "doc id discovery found nothing");
-            return found;
+            return Ok(found);
         }
         tracing::info!(page = %page, found = found.len(), "discovered GraphQL doc ids");
         state.cache.record(&found, unix_now());
         save_cache(state).await;
-        found
+        Ok(found)
     }
 
     /// `lsd` / `fb_dtsg` for a request on `page`: that page's, else the latest

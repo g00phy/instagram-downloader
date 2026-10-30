@@ -236,6 +236,8 @@ pub struct Client {
     last_api: Mutex<Option<Instant>>,
     /// Global pause after a 429: no request starts before this.
     pause_until: Mutex<Option<Instant>>,
+    /// When a crawl last met a 429 (quick checks do not count).
+    last_rate_limit: Mutex<Option<Instant>>,
     /// Parsed pages by path.
     pages: Mutex<HashMap<String, Arc<PageInfo>>>,
     /// Tokens of the latest page that had some.
@@ -324,6 +326,7 @@ impl Client {
             turn: tokio::sync::Mutex::new(()),
             last_api: Mutex::new(None),
             pause_until: Mutex::new(None),
+            last_rate_limit: Mutex::new(None),
             pages: Mutex::new(HashMap::new()),
             latest_tokens: Mutex::new(None),
             doc_ids: tokio::sync::Mutex::new(doc_ids),
@@ -584,6 +587,10 @@ impl Client {
                     if options.quick {
                         return Err(Error::RateLimited(detail));
                     }
+                    if self.repeated_rate_limit() {
+                        tracing::warn!("{detail} again soon after the last one; giving up");
+                        return Err(Error::RateLimited(RATE_LIMITED.to_string()));
+                    }
                     if rate_attempt >= self.config.rate_limit_retries {
                         tracing::warn!("{detail} again; giving up");
                         return Err(Error::RateLimited(RATE_LIMITED.to_string()));
@@ -619,23 +626,28 @@ impl Client {
     /// Waits for the global pause (unless `quick`) and, for API calls, until
     /// `api_delay` + jitter has passed since the previous API call.
     async fn wait_turn(&self, kind: Kind, quick: bool) {
-        let _turn = self.turn.lock().await;
-        if !quick {
-            while let Some(until) = self.pause_deadline() {
-                tracing::info!(
-                    "waiting {:.0?} before the next request (Instagram rate limit)",
-                    until.saturating_duration_since(Instant::now())
-                );
-                tokio::time::sleep_until(until).await;
+        if quick {
+            // Interactive checks go straight through: no queue behind other
+            // callers' pauses and delays (they still count as an API call).
+            if kind == Kind::Api {
+                self.mark_api_call();
             }
+            return;
+        }
+        let _turn = self.turn.lock().await;
+        while let Some(until) = self.pause_deadline() {
+            tracing::info!(
+                "waiting {:.0?} before the next request (Instagram rate limit)",
+                until.saturating_duration_since(Instant::now())
+            );
+            tokio::time::sleep_until(until).await;
         }
         if kind != Kind::Api {
             return;
         }
         let delay = self.config.api_delay;
         let previous = *lock(&self.last_api);
-        if !quick
-            && !delay.is_zero()
+        if !delay.is_zero()
             && let Some(previous) = previous
         {
             let jitter = delay.mul_f64(rand::random_range(0.0..=1.0));
@@ -646,6 +658,16 @@ impl Client {
 
     fn mark_api_call(&self) {
         *lock(&self.last_api) = Some(Instant::now());
+    }
+
+    /// Records a 429 met while crawling; `true` when another one came less than
+    /// ten pause lengths before it, which means the job should stop rather than
+    /// keep provoking Instagram (gallery-dl #9540: accounts got locked that way).
+    fn repeated_rate_limit(&self) -> bool {
+        let now = Instant::now();
+        let window = self.config.rate_limit_wait.saturating_mul(10);
+        let previous = lock(&self.last_rate_limit).replace(now);
+        previous.is_some_and(|at| now.saturating_duration_since(at) < window)
     }
 
     /// Starts (or extends) the global pause after a 429.
@@ -1099,13 +1121,15 @@ impl Client {
         if has("feedback_required") {
             return Some(Failure::Fatal(Error::RateLimited(FEEDBACK_REQUIRED.into())));
         }
-        if has("login_required") || json.get("require_login") == Some(&Value::Bool(true)) {
-            return Some(Failure::Fatal(Error::Auth(NOT_LOGGED_IN.into())));
-        }
+        // Before the login check: Instagram's throttle answer is
+        // `{"message":"Please wait a few minutes…","require_login":true}`.
         if message.contains("please wait a few minutes") {
             return Some(Failure::Fatal(Error::RateLimited(format!(
                 "{PLEASE_WAIT} (HTTP {code})"
             ))));
+        }
+        if has("login_required") || json.get("require_login") == Some(&Value::Bool(true)) {
+            return Some(Failure::Fatal(Error::Auth(NOT_LOGGED_IN.into())));
         }
         None
     }

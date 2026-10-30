@@ -2299,6 +2299,15 @@ async fn please_wait_and_feedback_required_are_not_retried() {
             "re-export cookies or wait",
         ),
         (
+            // The body Instagram is reported to send: a throttle, not bad cookies.
+            ResponseTemplate::new(401).set_body_json(json!({
+                "message": "Please wait a few minutes before you try again.",
+                "require_login": true,
+                "status": "fail"
+            })),
+            "re-export cookies or wait",
+        ),
+        (
             ok(
                 json!({"message": "Please wait a few minutes before you try again.", "status": "fail"}),
             ),
@@ -2402,6 +2411,109 @@ async fn html_bodies_are_auth_or_parse() {
     );
 }
 
+#[tokio::test]
+async fn login_check_does_not_queue_behind_another_requests_pause() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/a/"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&server)
+        .await;
+    mount_form(&server, ok(web_form_data("viewer")), 1).await;
+    let client = Arc::new(Client::new(slow_pause_config(&server), Some(jar())).unwrap());
+    let crawl = {
+        let client = Arc::clone(&client);
+        tokio::spawn(async move { client.get_json("/api/v1/a/").await })
+    };
+    let started = Instant::now();
+    while client.paused_for().is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "no pause started"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    // The crawl now waits two minutes for the pause; the check must not.
+    let checked = Instant::now();
+    let me = client.current_user().await.unwrap();
+    assert_eq!(me.username, "viewer");
+    assert!(
+        checked.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        checked.elapsed()
+    );
+    crawl.abort();
+}
+
+#[tokio::test]
+async fn a_429_soon_after_another_one_stops_without_a_retry() {
+    let server = MockServer::start().await;
+    for route in ["/api/v1/a/", "/api/v1/b/"] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(429))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ok(json!({"status": "ok"})))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+    }
+    let client = Client::new(
+        ClientConfig {
+            rate_limit_wait: Duration::from_millis(50),
+            ..config(&server)
+        },
+        Some(jar()),
+    )
+    .unwrap();
+    client.get_json("/api/v1/a/").await.unwrap();
+    let err = client.get_json("/api/v1/b/").await.unwrap_err();
+    assert!(
+        matches!(&err, Error::RateLimited(m) if m.contains("wait 10-30 minutes")),
+        "{err:?}"
+    );
+    assert_eq!(
+        requests_to(&server, "/api/v1/b/").await.len(),
+        1,
+        "no retry"
+    );
+}
+
+#[tokio::test]
+async fn a_rate_limited_discovery_page_ends_the_crawl() {
+    let server = MockServer::start().await;
+    mount_profile(&server, "alice", USER_ID, None).await;
+    Mock::given(method("GET"))
+        .and(path("/alice/reels/"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ok(json!({"data": {}, "status": "ok"})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+    let err = run(
+        &client,
+        &profile_target(Some(ProfileSection::Reels)),
+        &opts(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, Error::RateLimited(_)), "{err:?}");
+    assert_eq!(
+        requests_to(&server, "/alice/reels/").await.len(),
+        2,
+        "first try + one retry"
+    );
+}
+
 // ---------------------------------------------------------------- login check
 
 /// Config whose rate-limit pause would take minutes: the login check must not wait.
@@ -2485,6 +2597,11 @@ async fn login_check_falls_back_to_the_probe_without_waiting() {
         ResponseTemplate::new(401).set_body_json(
             json!({"message": "Please wait a few minutes before you try again.", "status": "fail"}),
         ),
+        ResponseTemplate::new(401).set_body_json(json!({
+            "message": "Please wait a few minutes before you try again.",
+            "require_login": true,
+            "status": "fail"
+        })),
         ResponseTemplate::new(403)
             .set_body_json(json!({"message": "useragent mismatch", "status": "fail"})),
         ok(json!({"form_data": {"email": EMAIL}, "status": "ok"})),
