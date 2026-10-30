@@ -188,7 +188,7 @@ stdin (`-i -`).
 | `--no-archive` | off | ignore and don't update the archive |
 | `--retries N` | `5` | retries per file for network/5xx/429 errors |
 | `--limit-rate RATE` | none | global bandwidth cap, e.g. `500K`, `2M` |
-| `--api-delay SECS` | `1.5` | minimum pause between Instagram API requests (+ jitter) |
+| `--api-delay SECS` | `6` | minimum pause between Instagram API requests (+ random 0–100 %) |
 | `--user-agent UA` | desktop Chrome | best set to the browser the cookies came from |
 | `--data-dir DIR` | platform data dir | where `queue.json` / `archive.txt` live (`IGDL_DATA_DIR`) |
 | `-v` / `-q` | | more / less logging (stderr) |
@@ -230,8 +230,17 @@ out_dir = 'D:\insta'
 cookies = 'C:\Users\me\secrets\instagram-cookies.txt'
 jobs = 4
 template = "{owner}/{category}/{date}_{id}_{index}.{ext}"
-api_delay = 2.0
+api_delay = 8.0
+
+# Only when Instagram changed its web app and igdl reports "query … is outdated":
+# newer ids are in gallery-dl's QUERIES table (extractor/instagram.py).
+[doc_ids]
+PolarisProfilePostsTabContentQuery_connection = "39229011733413759"
 ```
+
+Windows paths in `config.toml` go in single quotes (`'D:\insta'`); in double quotes
+every `\` would start an escape. GraphQL query ids that `igdl` discovers are cached in
+`doc_ids.json` in the data dir for a day.
 
 stdout carries only the paths of newly downloaded files (one per line) for `get`
 and `start`, so the output can be piped; `list`, `cookies check` and `--dry-run`
@@ -246,15 +255,20 @@ kept and resume next time).
 ## Rate limits and safety
 
 Instagram rate-limits and may temporarily lock accounts that scrape aggressively.
-`igdl` keeps API calls sequential with a randomized pause (`--api-delay`), backs off
-on `429` / "please wait a few minutes", and stops with an authentication error
-(instead of retrying) on `login_required` or `checkpoint_required`. CDN downloads are
-parallel but carry no cookies. Large profile crawls are better done with `--limit`
-and `--update` over several runs than in one go.
+`igdl` keeps API calls sequential, 6–12 s apart by default (`--api-delay`, like
+gallery-dl). On HTTP 429 it pauses **every** request for 60 s and retries once; a
+second 429 stops the job ("wait 10–30 minutes"). "Please wait a few minutes" and
+`feedback_required` (Instagram restricted the account) stop at once, and so do
+`login_required` / `checkpoint_required` (cookies expired, or a login to confirm in
+the browser). Single posts are quick; profiles take a few seconds per page and one
+request per reel or tagged post, so large crawls are better done with `--limit` and
+`--update` over several runs. CDN downloads are parallel but carry no cookies.
 
 ## Limitations
 
-* Uses Instagram's private web API (`/api/v1/…`), which can change at any time.
+* Uses the private API of Instagram's web app (`/api/v1/…` and GraphQL), which
+  changes without notice; GraphQL query ids are discovered automatically and can be
+  pinned with `[doc_ids]` in `config.toml`.
 * Videos are the best **progressive** MP4 Instagram offers; separate DASH
   video/audio streams (sometimes higher resolution) are not merged.
 * Cookies must be exported to a file; reading browser cookie stores directly is

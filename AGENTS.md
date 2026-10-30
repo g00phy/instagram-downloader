@@ -10,8 +10,9 @@ feature) and end-to-end tests (`tests/cli_e2e.rs` drives the `igdl` binary again
 mocked API + CDN; `tests/gui_controller.rs` and `tests/gui_view.rs` cover the window).
 Built as: docs → skeleton with shared types → four modules in parallel (one agent per
 git worktree) → CLI integration → end-to-end tests → GUI protocol → controller and
-window in parallel → screenshots under Xvfb. Not yet verified against live Instagram; see
-"Unverified API assumptions" below before changing the client.
+window in parallel → screenshots under Xvfb → Windows review and fixes → port from
+the retired REST endpoints to the web GraphQL flow. Not yet verified against live
+Instagram; see "Unverified API assumptions" below before changing the client.
 
 ## Purpose
 A JDownloader-style Instagram downloader: links go through a **LinkGrabber**
@@ -49,7 +50,10 @@ links ──► links::parse_link ──► Target
 | `src/redact.rs` | Scrub secrets (cookie values, signed URL params) from strings before display. |
 | `src/links.rs` | URL/username → `Target`; Markdown unwrap; links files; shortcode ⇄ media id. |
 | `src/naming.rs` | Filename templates, Windows-safe sanitising, path-escape prevention. |
-| `src/instagram/client.rs` | HTTP client for the web API: headers, cookies, throttle, 429 backoff, error mapping. |
+| `src/instagram/client.rs` | HTTP client for the web app: headers, cookies, pacing, global 429 pause, error mapping, login check, profile pages. |
+| `src/instagram/web.rs` | Parsing profile pages: profile id, privacy, GraphQL tokens, JS bundle URLs. |
+| `src/instagram/graphql.rs` | GraphQL requests (form body, headers, connection pagination, outdated-query detection). |
+| `src/instagram/doc_ids.rs` | GraphQL operations, built-in doc ids, `[doc_ids]` overrides, discovery and the `doc_ids.json` cache. |
 | `src/instagram/models.rs` | Lenient serde structs for API responses. |
 | `src/instagram/extract.rs` | API media item → `Vec<MediaFile>` (best candidate selection, carousels). |
 | `src/instagram/crawler.rs` | `resolve(Target)` with pagination, limits, date filters, `--update`; `refresh` of expired URLs. |
@@ -76,31 +80,40 @@ the terminal.
 
 ## Instagram web API notes
 
-Base `https://www.instagram.com` (overridable with `IGDL_API_BASE` for tests). Calls
-are `GET` unless marked `POST` (form-encoded), all with these headers:
+Since September 2026 Instagram refuses most `/api/v1/` endpoints for browser-cookie
+sessions (`users/{id}/info` always 429; `web_profile_info` 429 since Feb 2026;
+`feed/user` and `highlights_tray` redirect to the home page; `clips/user` and
+`usertags` 429). The client follows the web app instead, as gallery-dl 1.32.17
+(2026-10-17) does; its `extractor/instagram.py` is the reference to diff against
+when something breaks.
 
-```text
-User-Agent:        desktop Chrome UA (configurable)
-X-IG-App-ID:       936619743392459
-X-ASBD-ID:         129477
-X-IG-WWW-Claim:    0
-X-Requested-With:  XMLHttpRequest
-X-CSRFToken:       <csrftoken cookie>
-Referer:           https://www.instagram.com/
-Cookie:            <instagram.com cookies>
-```
+Base `https://www.instagram.com` (`IGDL_API_BASE` in tests). Every API call carries
+the cookies, `X-CSRFToken`, `X-IG-App-ID: 936619743392459`, `X-ASBD-ID: 359341`,
+`X-IG-WWW-Claim` (starts `0`, replaced by any `x-ig-set-www-claim` response header),
+`X-Requested-With: XMLHttpRequest`, `Origin` and `Referer`. The default User-Agent is
+desktop Chrome 150 on Windows. HTML pages are fetched with browser navigation
+headers (`Sec-Fetch-Mode: navigate`, …). JS bundles on `static.cdninstagram.com`
+are fetched **without cookies**.
 
-| Purpose | Endpoint | Data |
+| Purpose | Request | Data |
 |---|---|---|
-| Profile | `/api/v1/users/web_profile_info/?username=U` | `data.user{id, username, is_private, followed_by_viewer}` |
-| Who am I | `/api/v1/accounts/current_user/?edit=true`, then `/api/v1/users/{ds_user_id}/info/` (one quick attempt each, no backoff) | `user{pk, username}` |
-| Post | `/api/v1/media/{media_id}/info/` | `items[0]` |
-| Posts feed | `/api/v1/feed/user/{user_id}/?count=12&max_id=M` | `items[]`, `more_available`, `next_max_id` |
-| Reels | `POST /api/v1/clips/user/` form `target_user_id=ID&page_size=12&max_id=M` | `items[].media`, `paging_info{more_available, max_id}` |
-| Tagged | `/api/v1/usertags/{user_id}/feed/?count=12&max_id=M` | like the posts feed |
-| Stories | `/api/v1/feed/reels_media/?reel_ids={user_id}` | `reels_media[].items[]` (or `reels{id}.items`) |
-| Highlights list | `/api/v1/highlights/{user_id}/highlights_tray/` | `tray[]{id: "highlight:N", title}` |
-| Highlight | `/api/v1/feed/reels_media/?reel_ids=highlight:N` | as stories |
+| Who am I | `GET /api/v1/accounts/edit/web_form_data/`, then `GET /graphql/query/?query_hash=d6f4427fbe92d846298cf93df0b937d3` (one quick attempt each) | `form_data.username` (read nothing else: the body holds e-mail, phone, birthday); `data.user.username`, `null` = not logged in |
+| Profile | `GET /{username}/` (page navigation) | `"profile_id":"N"`, `is_private`, GraphQL tokens `lsd`/`fb_dtsg` (`__eqmc` keys `l`/`f`), `rsrc.php` bundle URLs |
+| Post | `GET /api/v1/media/{media_id}/info/` | `items[0]`; a redirect to `/` or the login page = cookies invalid |
+| Posts | GraphQL `PolarisProfilePostsTabContentQuery_connection` | `xdt_api__v1__feed__user_timeline_graphql_connection.edges[].node` (v1 media items), `page_info` |
+| Reels | GraphQL `PolarisProfileReelsTabContentQuery_connection` | shortcodes, then `media/{id}/info` per reel |
+| Tagged | GraphQL `PolarisProfileTaggedTabContentQuery_connection` | shortcodes, then `media/{id}/info` per post |
+| Highlights list | GraphQL `PolarisProfileStoryHighlightsTrayContentQuery` | `highlight:N` ids and titles |
+| Stories, highlight items | `GET /api/v1/feed/reels_media/?reel_ids=…`, on 5xx/redirect/HTML the GraphQL `PolarisStoriesV3ReelPageGalleryQuery` | reel items (v1 media items) |
+
+GraphQL calls are form-encoded POSTs shaped like gallery-dl's `_prepare_graphql`
+(`doc_id`, `variables`, `fb_api_req_friendly_name`, `lsd`, `fb_dtsg`, …; headers
+`X-FB-Friendly-Name`, `X-Root-Field-Name`, `X-FB-LSD`). **Doc ids change within
+days.** Priority: `[doc_ids]` in `config.toml` > `doc_ids.json` in the data dir
+(discovered from the profile page's `rsrc.php` bundles, `__d("<Name>_instagramRelayOperation",…exports="<id>")`,
+kept 24 h) > the built-in defaults in `src/instagram/doc_ids.rs`. An error inside an
+HTTP 200 (`errors[]`, persisted query not found, …) means the id is outdated: one
+rediscovery, then a `Parse` error naming the query.
 
 Media item fields: `pk` (number or string), `id` (`"{pk}_{owner_pk}"`), `code`
 (shortcode), `media_type` (1 image, 2 video, 8 carousel), `taken_at` (unix secs),
@@ -114,26 +127,30 @@ Shortcode → media id: base64 digits over
 `ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_`. Shortcodes of
 private posts carry 28 extra characters: if `len > 28`, drop the last 28 first.
 
-Error signals → `Error`:
-* `401`/`403` with `login_required`, `require_login: true`, or a redirect to
-  `/accounts/login/` → `Auth` (cookies missing/expired). `checkpoint_required` /
-  `challenge_required` → `Auth` with "confirm the login in your browser".
-* `429`, or `"Please wait a few minutes"` → `RateLimited`: back off (30s, 60s, 120s…)
-  then give up.
-* `404`, `data.user == null` → `NotFound`. `is_private && !followed_by_viewer` → `Private`.
-* An HTML body where JSON was expected → `Auth` if it is the login page, else `Parse`.
+Pacing and errors:
+* API calls are spaced by `api_delay` (default 6 s) plus a random 0–100 %; the first
+  call is not delayed; pages and static scripts are exempt (still sequential).
+* HTTP 429 → a **global** pause (`rate_limit_wait`, 60 s) for every request, one
+  retry, then `RateLimited` ("wait 10–30 minutes"). The login check never waits
+  (one attempt per step) and reports a rate limit as *unverified*, not as bad cookies.
+* 401 "Please wait a few minutes" and `feedback_required` → `RateLimited`, not retried.
+* Redirect to `/accounts/login/`, `login_required`, `require_login: true` → `Auth`;
+  `checkpoint_required` / `challenge_required` → `Auth` ("confirm the login in your
+  browser").
+* Profile page 404 → `NotFound`; a private profile whose posts query returns nothing
+  or refuses → `Private`.
 * CDN `403`/`410` on a media URL → the signed URL expired: refresh via `media_info`
   once, then retry. CDN URLs carry an `oe=<hex unix time>` expiry parameter.
 
 ### Unverified API assumptions
-The client was built from the endpoint shapes above and tested only against mocks.
-When live behaviour differs, these are the first suspects:
-* `POST /api/v1/clips/user/`: first page sent without `max_id`.
-* `reel_ids=highlight%3AN`: the colon is percent-encoded in the query.
-* `login_required` / `require_login` / `checkpoint_required` detection relies on
-  those strings appearing in the JSON body or the redirect `Location`.
-* `X-IG-WWW-Claim` is always `0` (the server's `x-ig-set-www-claim` is ignored).
-* Progressive `video_versions` only; DASH manifests are ignored.
+Built from gallery-dl 1.32.17, instaloader master and issue reports up to October 2026;
+tested only against mocks. When live behaviour differs, suspect first:
+* the built-in doc ids (refresh them from gallery-dl's `QUERIES` table or set
+  `[doc_ids]`), and the `rsrc.php` discovery pattern;
+* the GraphQL form fields gallery-dl sends that igdl omits (`av`, `__rev`, `__hsi`);
+* `web_form_data` and the `query_hash` probe for the login check;
+* `feed/reels_media` on www (gallery-dl replaced it; igdl keeps it with a fallback);
+* progressive `video_versions` only; DASH manifests are ignored.
 
 ## Rules for every change
 
